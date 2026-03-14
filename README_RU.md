@@ -14,6 +14,7 @@
 | [rockbun](./rockbun) | Обёртка PostgreSQL (bun ORM) с настройкой пула соединений и хелперами для транзакций |
 | [rockbus](./rockbus) | Внутрипроцессная шина событий с упорядоченной доставкой по топикам и интеграцией с rockengine |
 | [rockcron](./rockcron) | Планировщик задач с cron-выражениями, интервальными джобами и цепочками хендлеров |
+| [rocktelebot](./rocktelebot) | Обёртка Telegram-бота со структурированными хендлерами, встроенными мидлварами и билдерами клавиатур |
 
 ## Архитектура
 
@@ -28,6 +29,7 @@ rockengine
     ├── rockfiber   (HTTP-сервер)
     ├── rockbus     (шина событий)
     ├── rockcron    (планировщик)
+    ├── rocktelebot (telegram бот)
     └── твои сервисы
 
 rockconfig  ──►  конфиги всех модулей
@@ -88,6 +90,7 @@ go get github.com/arzab/gorock-kit/rockredis
 go get github.com/arzab/gorock-kit/rockbun
 go get github.com/arzab/gorock-kit/rockbus
 go get github.com/arzab/gorock-kit/rockcron
+go get github.com/arzab/gorock-kit/rocktelebot
 ```
 
 ## Локальная разработка

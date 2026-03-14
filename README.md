@@ -14,6 +14,7 @@ A collection of Go modules for building production-ready applications. Each modu
 | [rockbun](./rockbun) | PostgreSQL wrapper (bun ORM) with connection pool and transaction helpers |
 | [rockbus](./rockbus) | In-process event bus with per-topic ordered delivery and rockengine integration |
 | [rockcron](./rockcron) | Scheduled job runner with cron expressions, interval jobs, and handler chains |
+| [rocktelebot](./rocktelebot) | Telegram bot wrapper with structured handlers, built-in middlewares, and keyboard builders |
 
 ## Architecture
 
@@ -28,6 +29,7 @@ rockengine
     ├── rockfiber   (HTTP server)
     ├── rockbus     (event bus)
     ├── rockcron    (scheduler)
+    ├── rocktelebot (telegram bot)
     └── your apps
 
 rockconfig  ──►  all module Configs
@@ -88,6 +90,7 @@ go get github.com/arzab/gorock-kit/rockredis
 go get github.com/arzab/gorock-kit/rockbun
 go get github.com/arzab/gorock-kit/rockbus
 go get github.com/arzab/gorock-kit/rockcron
+go get github.com/arzab/gorock-kit/rocktelebot
 ```
 
 ## Local development
