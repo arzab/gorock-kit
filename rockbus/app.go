@@ -44,6 +44,7 @@ type asyncJob struct {
 //	engine.MustRegister("bus", app, rockengine.RestartPolicy{})
 type App struct {
 	cfg      Config
+	onError  func(ctx context.Context, event Event, err error)
 	mu       sync.RWMutex
 	handlers map[Topic][]Handler
 	queues   map[Topic]chan asyncJob // one channel per topic, created at Exec time
@@ -54,10 +55,13 @@ type App struct {
 }
 
 // NewApp creates an App with the given subscriptions.
+// onError is called when an async handler errors, panics, the queue is full,
+// the app is stopped, or a topic has no worker. Nil = silently dropped.
 // Additional handlers can be registered later via Subscribe.
-func NewApp(cfg Config, subs ...Subscription) *App {
+func NewApp(cfg Config, onError func(ctx context.Context, event Event, err error), subs ...Subscription) *App {
 	app := &App{
 		cfg:      cfg,
+		onError:  onError,
 		handlers: make(map[Topic][]Handler),
 	}
 	for _, s := range subs {
@@ -260,7 +264,7 @@ func (a *App) processJob(job asyncJob) {
 // callOnError calls OnError safely — a panic inside OnError is recovered
 // and written to stderr to avoid bringing down a worker goroutine.
 func (a *App) callOnError(ctx context.Context, event Event, err error) {
-	if a.cfg.OnError == nil {
+	if a.onError == nil {
 		return
 	}
 	defer func() {
@@ -268,7 +272,7 @@ func (a *App) callOnError(ctx context.Context, event Event, err error) {
 			_, _ = fmt.Fprintf(errWriter, "rockbus: OnError panicked: %v\n%s\n", r, debug.Stack())
 		}
 	}()
-	a.cfg.OnError(ctx, event, err)
+	a.onError(ctx, event, err)
 }
 
 func (a *App) snapshot(topic Topic) []Handler {

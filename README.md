@@ -13,6 +13,7 @@ A collection of Go modules for building production-ready applications. Each modu
 | [rockredis](./rockredis) | Redis client wrapper (go-redis v9) with typed Service interface |
 | [rockbun](./rockbun) | PostgreSQL wrapper (bun ORM) with connection pool and transaction helpers |
 | [rockbus](./rockbus) | In-process event bus with per-topic ordered delivery and rockengine integration |
+| [rockcron](./rockcron) | Scheduled job runner with cron expressions, interval jobs, and handler chains |
 
 ## Architecture
 
@@ -26,6 +27,7 @@ All modules follow a consistent pattern:
 rockengine
     ├── rockfiber   (HTTP server)
     ├── rockbus     (event bus)
+    ├── rockcron    (scheduler)
     └── your apps
 
 rockconfig  ──►  all module Configs
@@ -54,11 +56,20 @@ func main() {
 
     // Event bus
     bus := rockbus.NewApp(cfg.Bus,
+        func(ctx context.Context, event rockbus.Event, err error) { /* handle */ },
         rockbus.On("user.created", onUserCreated),
         rockbus.On("order.placed", onOrderPlaced),
     )
     rockbus.SetDefault(bus)
     engine.MustRegister("bus", bus, rockengine.RestartPolicy{})
+
+    // Scheduler
+    cron := rockcron.NewApp(cfg.Cron,
+        func(ctx context.Context, job rockcron.Job, err error) { /* handle */ },
+        rockcron.Every("sync-cache",  5*time.Minute, syncCache),
+        rockcron.Cron("daily-report", "0 3 * * *",  dailyReport),
+    )
+    engine.MustRegister("cron", cron, rockengine.RestartPolicy{})
 
     engine.Run()
 }
@@ -76,6 +87,7 @@ go get github.com/arzab/gorock-kit/rockfiber
 go get github.com/arzab/gorock-kit/rockredis
 go get github.com/arzab/gorock-kit/rockbun
 go get github.com/arzab/gorock-kit/rockbus
+go get github.com/arzab/gorock-kit/rockcron
 ```
 
 ## Local development

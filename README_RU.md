@@ -13,6 +13,7 @@
 | [rockredis](./rockredis) | Обёртка Redis-клиента (go-redis v9) с типизированным интерфейсом Service |
 | [rockbun](./rockbun) | Обёртка PostgreSQL (bun ORM) с настройкой пула соединений и хелперами для транзакций |
 | [rockbus](./rockbus) | Внутрипроцессная шина событий с упорядоченной доставкой по топикам и интеграцией с rockengine |
+| [rockcron](./rockcron) | Планировщик задач с cron-выражениями, интервальными джобами и цепочками хендлеров |
 
 ## Архитектура
 
@@ -26,6 +27,7 @@
 rockengine
     ├── rockfiber   (HTTP-сервер)
     ├── rockbus     (шина событий)
+    ├── rockcron    (планировщик)
     └── твои сервисы
 
 rockconfig  ──►  конфиги всех модулей
@@ -54,11 +56,20 @@ func main() {
 
     // Шина событий
     bus := rockbus.NewApp(cfg.Bus,
+        func(ctx context.Context, event rockbus.Event, err error) { /* обработка */ },
         rockbus.On("user.created", onUserCreated),
         rockbus.On("order.placed", onOrderPlaced),
     )
     rockbus.SetDefault(bus)
     engine.MustRegister("bus", bus, rockengine.RestartPolicy{})
+
+    // Планировщик
+    cron := rockcron.NewApp(cfg.Cron,
+        func(ctx context.Context, job rockcron.Job, err error) { /* обработка */ },
+        rockcron.Every("sync-cache",  5*time.Minute, syncCache),
+        rockcron.Cron("daily-report", "0 3 * * *",  dailyReport),
+    )
+    engine.MustRegister("cron", cron, rockengine.RestartPolicy{})
 
     engine.Run()
 }
@@ -76,6 +87,7 @@ go get github.com/arzab/gorock-kit/rockfiber
 go get github.com/arzab/gorock-kit/rockredis
 go get github.com/arzab/gorock-kit/rockbun
 go get github.com/arzab/gorock-kit/rockbus
+go get github.com/arzab/gorock-kit/rockcron
 ```
 
 ## Локальная разработка
