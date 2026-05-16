@@ -94,8 +94,12 @@ type FiberApp struct {
 
 // New creates a FiberApp with the given config and endpoints.
 // Pass endpoints via NewEndpoint, GET, POST, etc.
-func New(cfg Config, endpoints ...FiberEndpoint) *FiberApp {
-	return &FiberApp{cfg: cfg, endpoints: endpoints}
+func New(cfg Config) *FiberApp {
+	return &FiberApp{cfg: cfg}
+}
+
+func (a *FiberApp) SetEndpoints(endpoints []FiberEndpoint) {
+	a.endpoints = endpoints
 }
 
 // Init sets up the fiber instance and registers global middlewares.
@@ -144,6 +148,11 @@ func (a *FiberApp) Exec(ctx context.Context) error {
 	if a.fiber == nil {
 		return fmt.Errorf("rockfiber: Init must be called before Exec")
 	}
+
+	if a.endpoints == nil {
+		return fmt.Errorf("rockfiber: SetEndpoints must be called before Exec")
+	}
+
 	a.setupEndpoints()
 
 	listenErr := make(chan error, 1)
