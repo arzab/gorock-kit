@@ -37,4 +37,4 @@ Fix roadmap and status: `FIX_PLAN.md`.
 
 ## Documentation
 
-Every module has `README.md` and `README_RU.md` (Russian). When changing a module's public API, update both READMEs and the module table/example in the root `README.md`/`README_RU.md`. Note: the root README example uses `rockengine.New()`, but the actual constructor is `rockengine.NewEngine()`.
+Every module has `README.md` and `README_RU.md` (Russian). When changing a module's public API, update both READMEs, the module's `example_test.go` (README snippets as compile-only `Example` funcs — keep them in sync, CI compiles them), and `CHANGELOG.md`. The root README example is copied from `examples/fullapp/main.go`, a separate module (in `go.work`, built by CI) that imports every library via `replace ../../rockX`; it is the only place cross-module imports are allowed.

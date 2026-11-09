@@ -42,7 +42,22 @@
   4. `rockbus.Subscribe` возвращает `error` (новый топик после `Init`, nil-хендлер). Порядок блокировок: `stateMu` → `mu`.
   5. `rockredis.Client(svc)` — функция пакета, а не метод интерфейса, чтобы не ломать пользовательские реализации `Service` (моки).
   - Попутно: Quick Start в README `rockbun`/`rockredis` был нерабочим (`Ping` без `Init`, несуществующий `Close`) — исправлен. В CI `cache-dependency-path` указывал на несуществующие `go.sum` модулей без зависимостей — заменён на `**/go.sum`. Линтер в CI (фаза 0) не работал бы вовсе: `golangci-lint-action@v6` не поддерживает golangci-lint v2, а v2.1.6 собран на Go 1.24 и отказывается от модулей на Go 1.25 — заменено на `@v8` + v2.5.0, прогнан в Docker на всех модулях (0 замечаний после исправления трёх находок, в т.ч. устаревшего `SetNX` в `rockredis`).
-- [ ] Фаза 6.
+- [x] **Фаза 6** — выполнена, кроме тегов (см. ниже):
+  - Проверка README: найдены и исправлены несуществующие API — `rockengine.New`, `rockbus.Config{OnError}` (в трёх местах), `rocklog.Any` (добавлен в `rocklog`), раздел «Архитектура» в корневом README (`rocklog ──► all modules` — модули не импортируют rocklog).
+  - `example_test.go` в каждом модуле: Quick Start из README как компилируемые `Example`-функции.
+  - `examples/fullapp` — рабочее приложение со всеми модулями; корневой README показывает его код. Сквозная проверка в Docker с postgres:16 + redis:7: HTTP, trace-id через шину в лог, pprof закрыт, SIGTERM → код выхода 0.
+  - `CHANGELOG.md` с таблицей изменений, требующих действий.
+  - **Теги не созданы**: теги на feature-ветке потеряются или будут указывать не туда после rebase/squash. После мержа в `main`:
+
+    ```sh
+    git checkout main && git pull
+    for m in rockbun rockbus rockconfig rockcron rockengine rockfiber rocklog rockredis rocktelebot; do
+      git tag "$m/v0.1.0"
+    done
+    git push origin --tags
+    ```
+
+    После публикации тегов `examples/fullapp/go.mod` можно перевести с `replace` на `v0.1.0` — но `replace` удобнее для разработки, оставлять тоже нормально.
 
 ## Фаза 0. Подготовка (без изменения поведения)
 
