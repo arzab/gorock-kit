@@ -79,7 +79,7 @@ app := rockfiber.New(*cfg,
 |-----------|--------------------------|
 | `port`, `admin_password` | `App fiber.Config` |
 | `endpoints_path_prefix`, `admin_endpoints_path` | `RateLimit`, `CorsConfig` |
-| `use_trace_id`, `compress`, `helmet` | `Swagger`, `MonitoringConfig` |
+| `use_trace_id`, `compress`, `helmet`, `pprof` | `Swagger`, `MonitoringConfig` |
 | `request_timeout`, `shutdown_timeout` | `NotFound`, `OnRequest`, `OnError` |
 | `tls_cert_file`, `tls_key_file` | |
 | `mask_internal_server_error_message` | |
@@ -104,6 +104,8 @@ type Config struct {
     Compress bool // gzip/deflate/brotli response compression
     Helmet   bool // security headers: X-Frame-Options, X-Content-Type-Options, HSTS, etc.
 
+    Pprof bool // pprof under <AdminEndpointsPath>/debug/pprof/, behind the admin password; off by default
+
     // Endpoint middlewares (routes under EndpointsPathPrefix only).
     UseTraceId     bool
     RequestTimeout time.Duration   // sets context deadline; 0 = disabled
@@ -111,7 +113,7 @@ type Config struct {
 
     Swagger          *SwaggerConfig
     MonitoringConfig *monitor.Config
-    CorsConfig       *cors.Config   // nil = allow all origins (see CORS section)
+    CorsConfig       *cors.Config   // nil = CORS disabled (see CORS section)
 
     MaskInternalServerErrorMessage string       // masks 500 messages; see Error Handling
     NotFound                       fiber.Handler // catch-all for unmatched routes
@@ -272,7 +274,7 @@ Config{
 }
 ```
 
-The real error message is visible when `?debug=` is added to the request URL — useful for investigating issues in any environment without redeployment.
+Only unexpected errors (500 with source `internal`) are masked; `ErrorResponse` and `fiber.Error` values you return keep their message. Clients cannot bypass the mask. `OnError` always receives the real message, so log there.
 
 ### Custom error handler
 
@@ -390,7 +392,7 @@ Registered under `AdminEndpointsPath` (default `/admin`), protected by `X-Admin-
 | Route             | Description                  |
 |-------------------|------------------------------|
 | `GET /admin/metrics` | fiber monitor dashboard   |
-| `GET /admin/debug/pprof/*` | Go pprof endpoints  |
+| `GET /admin/debug/pprof/*` | Go pprof endpoints (only with `Pprof: true`) |
 
 If `AdminPassword` is empty, all admin requests return 401.
 
@@ -403,8 +405,11 @@ If `AdminPassword` is empty, all admin requests return 401.
 ## CORS
 
 ```go
-// Allow all origins (default — safe for public APIs without credentials)
+// No CORS middleware (default) — browsers block cross-origin requests
 Config{CorsConfig: nil}
+
+// Allow all origins explicitly (public API without credentials)
+Config{CorsConfig: &cors.Config{}}
 
 // Restrict origins
 Config{
@@ -415,7 +420,7 @@ Config{
 }
 ```
 
-> **Warning:** The default CORS policy (`nil`) allows all origins (`*`). If your API uses cookies or `Authorization` headers with browser clients, always set `CorsConfig` explicitly.
+> **Changed:** previously `nil` allowed all origins (`*`). Now no CORS headers are sent unless `CorsConfig` is set. Same-origin requests and non-browser clients are unaffected.
 
 ## Context Helpers
 
@@ -425,7 +430,12 @@ rockfiber.HandlerInitInCtx[MyStruct]("my-key")
 
 // Retrieve it downstream (type-safe)
 val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
+
+// Trace ID (with UseTraceId) from any context derived from c.UserContext()
+id := rockfiber.TraceIdFromContext(c.UserContext())
 ```
+
+Pass `c.UserContext()` to your services so they can read the trace ID — e.g. to attach it to a logger with `rocklog.WithContext`.
 
 ## Panic Recovery
 
@@ -438,4 +448,3 @@ val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
 - `RequestTimeout` sets a context deadline but does not forcefully kill goroutines. Handlers that ignore `ctx.Done()` complete normally.
 - `Helmet: true` with `Swagger` may conflict on `Content-Security-Policy`.
 - `EndpointsPathPrefix` should not overlap with `/status` or `AdminEndpointsPath`.
-- `?debug=` reveals the original error message when `MaskInternalServerErrorMessage` is set. Restrict this at the gateway level if needed in production.

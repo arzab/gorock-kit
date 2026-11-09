@@ -19,8 +19,11 @@ var ErrPanic = errors.New("rockcron: job panic")
 //
 // Each job runs in its own goroutine on its defined schedule.
 // If a job is still running when its next tick arrives it is skipped
-// (SkipIfStillRunning). When the App stops, all running jobs finish
-// before Exec returns.
+// (SkipIfStillRunning). When the App stops, the context passed to running
+// jobs is cancelled and Exec returns only after they finish.
+//
+// Configuration errors (invalid location or schedule) are returned from
+// Init, so they fail engine startup instead of triggering restarts.
 //
 // Usage:
 //
@@ -33,13 +36,17 @@ var ErrPanic = errors.New("rockcron: job panic")
 //	)
 //	engine.MustRegister("cron", app, rockengine.RestartPolicy{})
 type App struct {
-	cfg      Config
-	onError  func(ctx context.Context, job Job, err error)
-	jobs     []Job
-	doneMu   sync.Mutex
-	done     chan struct{}
-	stopOnce sync.Once
-	running  bool
+	cfg     Config
+	onError func(ctx context.Context, job Job, err error)
+	jobs    []Job
+
+	// mu guards the per-Init state below.
+	mu      sync.Mutex
+	cron    *cron.Cron
+	stopCh  chan struct{} // closed by Stop
+	stopped bool          // Stop was called since the last Init
+	running bool          // Exec is active
+	jobCtx  context.Context
 }
 
 // NewApp creates an App with the given jobs.
@@ -52,39 +59,9 @@ func NewApp(cfg Config, onError func(ctx context.Context, job Job, err error), j
 	}
 }
 
-// Init prepares the App for execution.
+// Init validates the location and every schedule and builds the scheduler.
 // Safe to call again after Stop — resets internal state for restart.
 func (a *App) Init(_ context.Context) error {
-	a.doneMu.Lock()
-	defer a.doneMu.Unlock()
-
-	a.done = make(chan struct{})
-	a.stopOnce = sync.Once{}
-	return nil
-}
-
-// Exec starts the scheduler and blocks until ctx is cancelled or Stop is called.
-// All running jobs complete before Exec returns.
-func (a *App) Exec(ctx context.Context) error {
-	a.doneMu.Lock()
-	if a.done == nil {
-		a.doneMu.Unlock()
-		return fmt.Errorf("rockcron: Init must be called before Exec")
-	}
-	if a.running {
-		a.doneMu.Unlock()
-		return fmt.Errorf("rockcron: Exec is already running")
-	}
-	a.running = true
-	done := a.done
-	a.doneMu.Unlock()
-
-	defer func() {
-		a.doneMu.Lock()
-		a.running = false
-		a.doneMu.Unlock()
-	}()
-
 	loc := time.UTC
 	if a.cfg.Location != "" {
 		var err error
@@ -98,44 +75,87 @@ func (a *App) Exec(ctx context.Context) error {
 		cron.WithLocation(loc),
 		cron.WithChain(cron.SkipIfStillRunning(cron.DiscardLogger)),
 	)
-
 	for _, job := range a.jobs {
 		j := job
-		if _, err := c.AddFunc(j.Schedule(), func() {
-			if err := safeCall(ctx, j); err != nil {
-				a.callOnError(ctx, j, err)
-			}
-		}); err != nil {
+		if _, err := c.AddFunc(j.Schedule(), func() { a.runJob(j) }); err != nil {
 			return fmt.Errorf("rockcron: invalid schedule for job %q: %w", JobName(j), err)
 		}
 	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.running {
+		return fmt.Errorf("rockcron: Init called while Exec is running")
+	}
+	a.cron = c
+	a.stopCh = make(chan struct{})
+	a.stopped = false
+	a.jobCtx = nil
+	return nil
+}
+
+// Exec starts the scheduler and blocks until ctx is cancelled or Stop is called.
+// Running jobs see their context cancelled and complete before Exec returns.
+func (a *App) Exec(ctx context.Context) error {
+	a.mu.Lock()
+	if a.cron == nil {
+		a.mu.Unlock()
+		return fmt.Errorf("rockcron: Init must be called before Exec")
+	}
+	if a.running {
+		a.mu.Unlock()
+		return fmt.Errorf("rockcron: Exec is already running")
+	}
+	if a.stopped {
+		a.mu.Unlock()
+		return nil // Stop arrived between Init and Exec
+	}
+	jobCtx, cancelJobs := context.WithCancel(ctx)
+	defer cancelJobs()
+	a.running = true
+	a.jobCtx = jobCtx
+	c, stopCh := a.cron, a.stopCh
+	a.mu.Unlock()
 
 	c.Start()
 
 	select {
 	case <-ctx.Done():
-		a.Stop()
-	case <-done:
+	case <-stopCh:
 	}
 
-	// Wait for all running jobs to complete.
-	<-c.Stop().Done()
+	cancelJobs()
+	<-c.Stop().Done() // wait for running jobs
 
+	a.mu.Lock()
+	a.running = false
+	a.mu.Unlock()
 	return nil
 }
 
-// Stop signals the scheduler to stop and waits for running jobs to finish.
-// Safe to call multiple times and before Init.
+// Stop signals the scheduler to stop. It does not wait: Exec returns once
+// running jobs have finished. Safe to call multiple times and before Init.
 func (a *App) Stop() []error {
-	a.doneMu.Lock()
-	done := a.done
-	a.doneMu.Unlock()
-
-	if done == nil {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.stopCh == nil || a.stopped {
 		return nil
 	}
-	a.stopOnce.Do(func() { close(done) })
+	a.stopped = true
+	close(a.stopCh)
 	return nil
+}
+
+func (a *App) runJob(j Job) {
+	a.mu.Lock()
+	ctx := a.jobCtx
+	a.mu.Unlock()
+	if ctx == nil || ctx.Err() != nil {
+		return // fired while stopping
+	}
+	if err := safeCall(ctx, j); err != nil {
+		a.callOnError(ctx, j, err)
+	}
 }
 
 func (a *App) callOnError(ctx context.Context, job Job, err error) {

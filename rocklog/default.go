@@ -7,24 +7,24 @@ import (
 
 var (
 	defaultMu     sync.RWMutex
-	defaultLogger Logger = newLogrusLogger(Config{
+	defaultLogger Logger = newSlogLogger(Config{
 		Level:  LevelInfo,
 		Format: FormatText,
 		Output: os.Stdout,
 	}, 1) // callerSkip=1 to account for the extra package-level function frame
 )
 
-// Init replaces the default logger with a new logrus-backed Logger.
+// Init replaces the default logger with a new slog-backed Logger.
 // Safe to call concurrently, but should typically be called once at startup.
 func Init(cfg Config) {
-	l := newLogrusLogger(cfg, 1)
+	l := newSlogLogger(cfg, 1)
 	defaultMu.Lock()
 	defaultLogger = l
 	defaultMu.Unlock()
 }
 
 // SetDefault replaces the default logger with any Logger implementation.
-// Note: if the provided Logger is backed by logrus and has Caller enabled,
+// Note: if the provided Logger comes from New and has Caller enabled,
 // use Init instead — New() sets callerSkip=0 which will report this package
 // as the call site rather than user code.
 func SetDefault(l Logger) {

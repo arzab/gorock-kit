@@ -16,7 +16,7 @@ type Subscription struct {
 //	    rockbus.On("order.placed",  handlers.OnOrderPlaced),
 //	}
 //
-//	app := rockbus.NewApp(cfg, delivery.Subscriptions...)
+//	app := rockbus.NewApp(cfg, onError, delivery.Subscriptions...)
 func On(topic Topic, handler Handler) Subscription {
 	return Subscription{topic: topic, handler: handler}
 }

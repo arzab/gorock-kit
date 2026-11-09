@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -15,15 +17,23 @@ const defaultShutdownTimeout = 30 * time.Second
 
 // entry holds the runtime state of a single registered app.
 type entry struct {
+	name   string
 	app    App
 	policy RestartPolicy
+
+	// lc serialises Init and Stop calls of this app, so a restart (Stop → Init)
+	// never interleaves with a shutdown-triggered Stop. Exec is not covered.
+	lc sync.Mutex
 
 	mu      sync.RWMutex
 	state   State
 	lastErr error
 	retries int
 	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	done    chan struct{} // closed when the current run goroutine exits; nil if never started
+	// stopped reports whether Stop has been called since the last successful Init.
+	// It guarantees Stop is called exactly once per Init.
+	stopped bool
 }
 
 func (ent *entry) setState(s State) {
@@ -40,18 +50,37 @@ func (ent *entry) setFailed(err error) {
 	ent.mu.Unlock()
 }
 
-// Engine manages the lifecycle of registered apps.
+// resourceEntry holds a registered Resource and whether it is initialised.
+type resourceEntry struct {
+	name   string
+	res    Resource
+	inited bool
+}
+
+// Engine manages the lifecycle of registered apps and resources.
 type Engine struct {
-	entries map[string]*entry
-	order   []string // registration order
+	entries   map[string]*entry
+	order     []string // registration order
+	resources []*resourceEntry
 
 	mu              sync.RWMutex
 	shutdownTimeout time.Duration
 	onFatal         func(name string, err error)
+	stopOnFatal     bool
 	running         bool
+	stopping        bool
 
-	engineCtx    context.Context
-	engineCancel context.CancelFunc
+	// baseCtx is the parent of every app context. It does not inherit
+	// cancellation from the caller's ctx, so apps can be cancelled one by one
+	// in reverse order during shutdown.
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
+
+	fatalOnce sync.Once
+	fatalCh   chan struct{} // closed when an app fails and stopOnFatal is set
+	fatalErr  error
+
+	stoppingApp atomic.Value // string: app currently being stopped, for timeout errors
 }
 
 // NewEngine creates a new Engine.
@@ -59,19 +88,40 @@ func NewEngine() *Engine {
 	return &Engine{
 		entries:         make(map[string]*entry),
 		shutdownTimeout: defaultShutdownTimeout,
+		stopOnFatal:     true,
 	}
 }
 
-// WithShutdownTimeout sets the maximum time to wait for all apps to stop.
+// WithShutdownTimeout sets the maximum time to wait for all apps to stop,
+// including their Stop calls.
 func (e *Engine) WithShutdownTimeout(d time.Duration) *Engine {
+	e.mu.Lock()
 	e.shutdownTimeout = d
+	e.mu.Unlock()
 	return e
 }
 
-// WithFatalHandler sets a callback invoked when an app exceeds its restart limit.
-// The engine keeps running; use this to observe or react to fatal app failures.
+// WithFatalHandler sets a callback invoked when an app is marked as failed
+// (restart limit exceeded or re-init failed).
 func (e *Engine) WithFatalHandler(fn func(name string, err error)) *Engine {
+	e.mu.Lock()
 	e.onFatal = fn
+	e.mu.Unlock()
+	return e
+}
+
+// WithStopOnFatal controls what happens when an app is marked as failed.
+//
+// true (default): the engine shuts down all apps and RunContext returns an
+// error naming the failed app. Use this when a process with a dead component
+// should be restarted by the orchestrator.
+//
+// false: the engine keeps running the remaining apps; observe failures via
+// WithFatalHandler or AppStatuses.
+func (e *Engine) WithStopOnFatal(stop bool) *Engine {
+	e.mu.Lock()
+	e.stopOnFatal = stop
+	e.mu.Unlock()
 	return e
 }
 
@@ -88,8 +138,8 @@ func (e *Engine) Register(name string, app App, policy ...RestartPolicy) (*Engin
 	if e.running {
 		return e, fmt.Errorf("cannot register app %q: engine is already running", name)
 	}
-	if _, exists := e.entries[name]; exists {
-		return e, fmt.Errorf("app %q is already registered", name)
+	if e.nameTaken(name) {
+		return e, fmt.Errorf("%q is already registered", name)
 	}
 
 	var p RestartPolicy
@@ -98,10 +148,12 @@ func (e *Engine) Register(name string, app App, policy ...RestartPolicy) (*Engin
 	}
 
 	e.entries[name] = &entry{
-		app:    app,
-		policy: p,
-		state:  StateIdle,
-		cancel: func() {}, // no-op until started
+		name:    name,
+		app:     app,
+		policy:  p,
+		state:   StateIdle,
+		cancel:  func() {}, // no-op until started
+		stopped: true,      // nothing to stop until Init succeeds
 	}
 	e.order = append(e.order, name)
 	return e, nil
@@ -115,15 +167,63 @@ func (e *Engine) MustRegister(name string, app App, policy ...RestartPolicy) *En
 	return e
 }
 
+// RegisterResource adds a named Resource. Resources are initialised before
+// all apps (in registration order) and stopped after all apps (in reverse
+// order). Names share one namespace with apps.
+func (e *Engine) RegisterResource(name string, res Resource) (*Engine, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if res == nil {
+		return e, fmt.Errorf("cannot register resource %q: resource is nil", name)
+	}
+	if e.running {
+		return e, fmt.Errorf("cannot register resource %q: engine is already running", name)
+	}
+	if e.nameTaken(name) {
+		return e, fmt.Errorf("%q is already registered", name)
+	}
+	e.resources = append(e.resources, &resourceEntry{name: name, res: res})
+	return e, nil
+}
+
+// MustRegisterResource is like RegisterResource but panics on error.
+func (e *Engine) MustRegisterResource(name string, res Resource) *Engine {
+	if _, err := e.RegisterResource(name, res); err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// nameTaken reports whether name is used by an app or a resource.
+// Caller must hold e.mu.
+func (e *Engine) nameTaken(name string) bool {
+	if _, ok := e.entries[name]; ok {
+		return true
+	}
+	for _, r := range e.resources {
+		if r.name == name {
+			return true
+		}
+	}
+	return false
+}
+
 // Run starts the engine with a background context.
 func (e *Engine) Run() error {
 	return e.RunContext(context.Background())
 }
 
 // RunContext initialises all apps sequentially, then runs each in a goroutine.
-// Blocks until ctx is cancelled or SIGINT/SIGTERM is received.
-// Returns an error if the engine is already running.
-// App failures are handled per-app restart policy and do not stop the engine.
+// Blocks until ctx is cancelled, SIGINT/SIGTERM is received, or (with
+// WithStopOnFatal, the default) an app is marked as failed.
+//
+// Shutdown stops apps one by one in reverse registration order: each app's
+// context is cancelled, its Stop is called, and its Exec is awaited before the
+// next app is stopped. The whole shutdown is bounded by the shutdown timeout.
+//
+// Returns the init error, the fatal app error (if that caused the shutdown),
+// and any Stop errors, joined.
 func (e *Engine) RunContext(ctx context.Context) error {
 	e.mu.Lock()
 	if e.running {
@@ -131,31 +231,44 @@ func (e *Engine) RunContext(ctx context.Context) error {
 		return fmt.Errorf("engine is already running")
 	}
 	e.running = true
+	e.stopping = false
 	order := make([]string, len(e.order))
 	copy(order, e.order)
+	baseCtx, baseCancel := context.WithCancel(context.WithoutCancel(ctx))
+	e.baseCtx = baseCtx
+	e.baseCancel = baseCancel
+	e.fatalOnce = sync.Once{}
+	e.fatalCh = make(chan struct{})
+	e.fatalErr = nil
+	fatalCh := e.fatalCh
+	timeout := e.shutdownTimeout
 	e.mu.Unlock()
 
 	defer func() {
+		baseCancel()
 		e.mu.Lock()
 		e.running = false
 		e.mu.Unlock()
 	}()
 
-	engineCtx, engineCancel := context.WithCancel(ctx)
-	defer engineCancel()
-
-	e.mu.Lock()
-	e.engineCtx = engineCtx
-	e.engineCancel = engineCancel
-	e.mu.Unlock()
+	// Resources first: apps may use them from Init on.
+	if err := e.initResources(baseCtx); err != nil {
+		return errors.Join(append([]error{err}, e.stopResources()...)...)
+	}
 
 	// Init sequentially to respect dependency order.
-	// On failure (including panic), stop already-initialised apps in reverse order.
+	// On failure (including panic), stop already-initialised apps in reverse
+	// order, then the resources.
 	var initDone []string
 	for _, name := range order {
-		if err := e.safeInit(engineCtx, name); err != nil {
+		ent := e.entries[name]
+		ent.lc.Lock()
+		err := safeInit(baseCtx, ent)
+		ent.lc.Unlock()
+		if err != nil {
 			e.stopInited(initDone)
-			return fmt.Errorf("app %q: init: %w", name, err)
+			initErr := fmt.Errorf("app %q: init: %w", name, err)
+			return errors.Join(append([]error{initErr}, e.stopResources()...)...)
 		}
 		initDone = append(initDone, name)
 	}
@@ -169,126 +282,165 @@ func (e *Engine) RunContext(ctx context.Context) error {
 	defer signal.Stop(quit)
 
 	select {
-	case <-engineCtx.Done():
+	case <-ctx.Done():
 	case <-quit:
+	case <-fatalCh:
 	}
 
-	engineCancel()
+	e.mu.Lock()
+	e.stopping = true
+	e.mu.Unlock()
 
-	shutdownErrs := e.stopAll(order)
+	var errs []error
 
-	// Wait for all goroutines with timeout.
-	done := make(chan struct{})
+	shutdownDone := make(chan []error, 1)
 	go func() {
-		for _, name := range order {
-			e.entries[name].wg.Wait()
-		}
-		close(done)
+		errs := e.stopAll(order)
+		errs = append(errs, e.stopResources()...)
+		shutdownDone <- errs
 	}()
 
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), e.shutdownTimeout)
-	defer shutdownCancel()
-
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
 	select {
-	case <-done:
-	case <-shutdownCtx.Done():
-		shutdownErrs = append(shutdownErrs, errors.New("shutdown timed out"))
+	case stopErrs := <-shutdownDone:
+		errs = append(errs, stopErrs...)
+	case <-timer.C:
+		name, _ := e.stoppingApp.Load().(string)
+		errs = append(errs, fmt.Errorf("shutdown timed out after %s while stopping %s", timeout, name))
 	}
 
-	return errors.Join(shutdownErrs...)
+	e.mu.RLock()
+	fatalErr := e.fatalErr
+	e.mu.RUnlock()
+	if fatalErr != nil {
+		errs = append([]error{fatalErr}, errs...)
+	}
+
+	return errors.Join(errs...)
 }
 
-// safeInit calls app.Init catching any panic and converting it to an error.
-func (e *Engine) safeInit(ctx context.Context, name string) (err error) {
+// safeInit calls app.Init, converting a panic to an error.
+// On success the app is marked as needing a Stop. Caller must hold ent.lc.
+func safeInit(ctx context.Context, ent *entry) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("panic: %v", r)
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
 		}
 	}()
-	return e.entries[name].app.Init(ctx)
+	if err := ent.app.Init(ctx); err != nil {
+		return err
+	}
+	ent.mu.Lock()
+	ent.stopped = false
+	ent.mu.Unlock()
+	return nil
+}
+
+// safeStop calls app.Stop at most once per successful Init, converting a panic
+// to an error. Caller must hold ent.lc.
+func safeStop(ent *entry) (errs []error) {
+	ent.mu.Lock()
+	if ent.stopped {
+		ent.mu.Unlock()
+		return nil
+	}
+	ent.stopped = true
+	ent.mu.Unlock()
+
+	defer func() {
+		if r := recover(); r != nil {
+			errs = append(errs, fmt.Errorf("app %q: stop: panic: %v\n%s", ent.name, r, debug.Stack()))
+		}
+	}()
+	return ent.app.Stop()
+}
+
+// safeExec calls app.Exec, converting a panic to an error so it goes through
+// the restart policy like any other failure.
+func safeExec(ctx context.Context, app App) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return app.Exec(ctx)
 }
 
 // stopInited stops already-initialised apps in reverse order after an Init failure.
 func (e *Engine) stopInited(names []string) {
 	for i := len(names) - 1; i >= 0; i-- {
-		e.entries[names[i]].app.Stop() //nolint:errcheck
+		ent := e.entries[names[i]]
+		ent.lc.Lock()
+		safeStop(ent)
+		ent.lc.Unlock()
 	}
 }
 
 // startApp creates a per-app context and launches its run goroutine.
 func (e *Engine) startApp(name string) {
 	e.mu.RLock()
-	engineCtx := e.engineCtx
+	baseCtx := e.baseCtx
 	e.mu.RUnlock()
 
 	ent := e.entries[name]
-	appCtx, appCancel := context.WithCancel(engineCtx)
+	appCtx, appCancel := context.WithCancel(baseCtx)
+	done := make(chan struct{})
 
 	ent.mu.Lock()
 	ent.cancel = appCancel
+	ent.done = done
 	ent.mu.Unlock()
 
-	ent.wg.Add(1)
-	go e.runApp(appCtx, name, ent)
+	go e.runApp(appCtx, ent, done)
 }
 
 // runApp runs an app in a retry loop according to its restart policy.
-func (e *Engine) runApp(ctx context.Context, name string, ent *entry) {
-	defer ent.wg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			err := fmt.Errorf("panic: %v", r)
-			ent.setFailed(err)
-			ent.mu.RLock()
-			policy := ent.policy
-			ent.mu.RUnlock()
-			e.notifyFatal(policy, name, err)
-		}
-	}()
+func (e *Engine) runApp(ctx context.Context, ent *entry, done chan struct{}) {
+	defer close(done)
+	policy := ent.policy
 
 	for {
-		ent.mu.RLock()
-		policy := ent.policy
-		ent.mu.RUnlock()
-
-		ent.setState(StateRunning)
-		err := ent.app.Exec(ctx)
-
-		// ctx cancelled — always a clean stop, no restart.
-		if errors.Is(err, context.Canceled) {
+		if ctx.Err() != nil {
 			ent.setState(StateStopped)
 			return
 		}
 
-		// Exec returned nil: clean exit.
-		// Restart only if RestartOnExit is set, otherwise treat as stopped.
+		ent.setState(StateRunning)
+		started := time.Now()
+		err := safeExec(ctx, ent.app)
+
+		// Context cancelled — always a clean stop, whatever Exec returned
+		// (http.ErrServerClosed, a wrapped ctx error, nil, ...).
+		if ctx.Err() != nil {
+			ent.setState(StateStopped)
+			return
+		}
+
 		if err == nil {
+			// Clean exit. Restart only if RestartOnExit is set.
 			if !policy.RestartOnExit {
 				ent.setState(StateStopped)
 				return
 			}
-			if ok := e.doRestart(ctx, name, ent, policy); !ok {
+		} else {
+			ent.mu.Lock()
+			if policy.ResetAfter > 0 && time.Since(started) >= policy.ResetAfter {
+				ent.retries = 0
+			}
+			ent.lastErr = err
+			ent.retries++
+			retries := ent.retries
+			ent.mu.Unlock()
+
+			canRestart := policy.MaxRetries < 0 || retries <= policy.MaxRetries
+			if !canRestart {
+				e.fail(ent, fmt.Errorf("exceeded retries (%d): %w", retries, err))
 				return
 			}
-			continue
 		}
 
-		// Exec returned an error.
-		ent.mu.Lock()
-		ent.lastErr = err
-		ent.retries++
-		retries := ent.retries
-		ent.mu.Unlock()
-
-		canRestart := policy.MaxRetries < 0 || retries <= policy.MaxRetries
-		if !canRestart {
-			fatalErr := fmt.Errorf("exceeded retries (%d): %w", retries, err)
-			ent.setFailed(fatalErr)
-			e.notifyFatal(policy, name, fatalErr)
-			return
-		}
-
-		if ok := e.doRestart(ctx, name, ent, policy); !ok {
+		if ok := e.doRestart(ctx, ent); !ok {
 			return
 		}
 	}
@@ -296,12 +448,15 @@ func (e *Engine) runApp(ctx context.Context, name string, ent *entry) {
 
 // doRestart performs the Stop → delay → Init sequence before the next Exec.
 // Returns false if the restart should be aborted (ctx cancelled or Init failed).
-func (e *Engine) doRestart(ctx context.Context, name string, ent *entry, policy RestartPolicy) bool {
+func (e *Engine) doRestart(ctx context.Context, ent *entry) bool {
 	ent.setState(StateRestarting)
-	ent.app.Stop() //nolint:errcheck
 
-	if policy.Delay > 0 {
-		timer := time.NewTimer(policy.Delay)
+	ent.lc.Lock()
+	safeStop(ent) //nolint:errcheck // stop errors during restart are not actionable
+	ent.lc.Unlock()
+
+	if d := ent.policy.Delay; d > 0 {
+		timer := time.NewTimer(d)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -309,35 +464,94 @@ func (e *Engine) doRestart(ctx context.Context, name string, ent *entry, policy 
 			return false
 		case <-timer.C:
 		}
-	} else if ctx.Err() != nil {
+	}
+
+	ent.lc.Lock()
+	if ctx.Err() != nil {
+		ent.lc.Unlock()
 		ent.setState(StateStopped)
 		return false
 	}
+	initErr := safeInit(ctx, ent)
+	ent.lc.Unlock()
 
-	if initErr := ent.app.Init(ctx); initErr != nil {
-		if errors.Is(initErr, context.Canceled) {
+	if initErr != nil {
+		if ctx.Err() != nil {
 			ent.setState(StateStopped)
-		} else {
-			fatalErr := fmt.Errorf("re-init failed: %w", initErr)
-			ent.setFailed(fatalErr)
-			e.notifyFatal(policy, name, fatalErr)
+			return false
 		}
+		e.fail(ent, fmt.Errorf("re-init failed: %w", initErr))
 		return false
 	}
-
 	return true
 }
 
+// fail marks the app as failed, releases its resources, notifies the fatal
+// handlers, and — with stopOnFatal — triggers engine shutdown.
+func (e *Engine) fail(ent *entry, err error) {
+	ent.setFailed(err)
+
+	ent.lc.Lock()
+	safeStop(ent) //nolint:errcheck // the app already failed; its stop errors add nothing
+	ent.lc.Unlock()
+
+	e.notifyFatal(ent, err)
+
+	e.mu.Lock()
+	stopOnFatal := e.stopOnFatal && e.running
+	fatalCh := e.fatalCh
+	e.mu.Unlock()
+
+	if stopOnFatal {
+		e.fatalOnce.Do(func() {
+			e.mu.Lock()
+			e.fatalErr = fmt.Errorf("app %q failed: %w", ent.name, err)
+			e.mu.Unlock()
+			close(fatalCh)
+		})
+	}
+}
+
 // notifyFatal calls the per-app OnFatal handler if set, otherwise falls back
-// to the engine-level fatal handler.
-func (e *Engine) notifyFatal(policy RestartPolicy, name string, err error) {
-	if policy.OnFatal != nil {
-		policy.OnFatal(err)
+// to the engine-level fatal handler. A panicking handler is recovered.
+func (e *Engine) notifyFatal(ent *entry, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "rockengine: fatal handler for app %q panicked: %v\n%s\n", ent.name, r, debug.Stack())
+		}
+	}()
+	if ent.policy.OnFatal != nil {
+		ent.policy.OnFatal(err)
 		return
 	}
-	if e.onFatal != nil {
-		e.onFatal(name, err)
+	e.mu.RLock()
+	onFatal := e.onFatal
+	e.mu.RUnlock()
+	if onFatal != nil {
+		onFatal(ent.name, err)
 	}
+}
+
+// stopEntry cancels an app's context, calls Stop (once per Init), and waits
+// for its run goroutine to exit.
+func (e *Engine) stopEntry(ent *entry) []error {
+	ent.mu.RLock()
+	cancel := ent.cancel
+	done := ent.done
+	ent.mu.RUnlock()
+
+	// Cancel first, then Stop — Stop may be needed to unblock a blocking Exec
+	// (e.g. an HTTP server).
+	cancel()
+
+	ent.lc.Lock()
+	errs := safeStop(ent)
+	ent.lc.Unlock()
+
+	if done != nil {
+		<-done
+	}
+	return errs
 }
 
 // StopApp stops a single app without affecting the others.
@@ -348,52 +562,60 @@ func (e *Engine) StopApp(name string) error {
 	if !ok {
 		return fmt.Errorf("app %q not found", name)
 	}
-
-	ent.mu.RLock()
-	cancel := ent.cancel
-	ent.mu.RUnlock()
-
-	// Cancel context and call Stop — Stop may be needed to unblock
-	// a blocking Exec (e.g. HTTP server).
-	cancel()
-	errs := ent.app.Stop()
-	ent.wg.Wait()
-
-	return errors.Join(errs...)
+	return errors.Join(e.stopEntry(ent)...)
 }
 
 // RestartApp stops an app and restarts it from Init.
-// Returns an error if the engine is not running.
+// Returns an error if the engine is not running or is shutting down.
 func (e *Engine) RestartApp(name string) error {
-	e.mu.RLock()
-	running := e.running
-	engineCtx := e.engineCtx
-	e.mu.RUnlock()
+	if err := e.checkAcceptingRestarts(); err != nil {
+		return err
+	}
 
-	if !running {
-		return fmt.Errorf("engine is not running")
+	ent, ok := e.entries[name]
+	if !ok {
+		return fmt.Errorf("app %q not found", name)
 	}
 
 	if err := e.StopApp(name); err != nil {
 		return err
 	}
 
-	// Re-check after StopApp — engine may have shut down in the meantime.
-	if engineCtx.Err() != nil {
-		return fmt.Errorf("engine stopped during restart")
+	// Re-check after StopApp — the engine may have begun shutting down meanwhile.
+	if err := e.checkAcceptingRestarts(); err != nil {
+		return err
 	}
 
-	ent := e.entries[name]
+	e.mu.RLock()
+	baseCtx := e.baseCtx
+	e.mu.RUnlock()
+
 	ent.mu.Lock()
 	ent.retries = 0
 	ent.lastErr = nil
 	ent.mu.Unlock()
 
-	if err := ent.app.Init(engineCtx); err != nil {
+	ent.lc.Lock()
+	err := safeInit(baseCtx, ent)
+	ent.lc.Unlock()
+	if err != nil {
+		ent.setFailed(fmt.Errorf("init: %w", err))
 		return fmt.Errorf("app %q: init: %w", name, err)
 	}
 
 	e.startApp(name)
+	return nil
+}
+
+func (e *Engine) checkAcceptingRestarts() error {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	if !e.running {
+		return fmt.Errorf("engine is not running")
+	}
+	if e.stopping {
+		return fmt.Errorf("engine is shutting down")
+	}
 	return nil
 }
 
@@ -441,27 +663,74 @@ func (e *Engine) Shutdown() []error {
 	return e.stopAll(order)
 }
 
-// stopAll cancels and stops apps in reverse order.
+// stopAll stops apps one by one in reverse registration order, so an app is
+// fully stopped before the apps it depends on (registered earlier) are touched.
 func (e *Engine) stopAll(order []string) []error {
 	var errs []error
 	for i := len(order) - 1; i >= 0; i-- {
-		ent := e.entries[order[i]]
+		name := order[i]
+		e.stoppingApp.Store(fmt.Sprintf("app %q", name))
+		errs = append(errs, e.stopEntry(e.entries[name])...)
+	}
+	e.stoppingApp.Store("")
+	return errs
+}
 
-		// Read cancel and decide whether to call Stop() under the same lock
-		// to avoid TOCTOU between state check and Stop() call.
-		ent.mu.Lock()
-		cancel := ent.cancel
-		skip := ent.state == StateStopped || ent.state == StateIdle
-		ent.mu.Unlock()
+// initResources initialises resources in registration order. On failure the
+// already-initialised ones stay marked so stopResources closes them.
+func (e *Engine) initResources(ctx context.Context) error {
+	e.mu.RLock()
+	resources := append([]*resourceEntry(nil), e.resources...)
+	e.mu.RUnlock()
 
-		cancel()
-
-		if skip {
-			continue
-		}
-		if stopErrs := ent.app.Stop(); len(stopErrs) > 0 {
-			errs = append(errs, stopErrs...)
+	for _, r := range resources {
+		if err := safeResourceInit(ctx, r); err != nil {
+			return fmt.Errorf("resource %q: init: %w", r.name, err)
 		}
 	}
+	return nil
+}
+
+// stopResources stops initialised resources in reverse registration order.
+func (e *Engine) stopResources() []error {
+	e.mu.RLock()
+	resources := append([]*resourceEntry(nil), e.resources...)
+	e.mu.RUnlock()
+
+	var errs []error
+	for i := len(resources) - 1; i >= 0; i-- {
+		r := resources[i]
+		if !r.inited {
+			continue
+		}
+		e.stoppingApp.Store(fmt.Sprintf("resource %q", r.name))
+		r.inited = false
+		if err := safeResourceStop(r); err != nil {
+			errs = append(errs, fmt.Errorf("resource %q: stop: %w", r.name, err))
+		}
+	}
+	e.stoppingApp.Store("")
 	return errs
+}
+
+func safeResourceInit(ctx context.Context, r *resourceEntry) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v\n%s", p, debug.Stack())
+		}
+	}()
+	if err := r.res.Init(ctx); err != nil {
+		return err
+	}
+	r.inited = true
+	return nil
+}
+
+func safeResourceStop(r *resourceEntry) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v\n%s", p, debug.Stack())
+		}
+	}()
+	return r.res.Stop()
 }

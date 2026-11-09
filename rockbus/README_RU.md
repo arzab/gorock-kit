@@ -16,12 +16,13 @@ var Subscriptions = []rockbus.Subscription{
 }
 
 // Создаём App с подписками
-app := rockbus.NewApp(rockbus.Config{
-    QueueSize: 1024,
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
+app := rockbus.NewApp(
+    rockbus.Config{QueueSize: 1024},
+    func(ctx context.Context, event rockbus.Event, err error) {
         log.Error("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
     },
-}, Subscriptions...)
+    Subscriptions...,
+)
 
 // Устанавливаем как глобальный экземпляр
 rockbus.SetDefault(app)
@@ -48,14 +49,16 @@ type Config struct {
 ## Жизненный цикл
 
 ```
-NewApp(cfg, subs...) → SetDefault → Init → Exec (блокирует) → Stop
+NewApp(cfg, onError, subs...) → SetDefault → Init → Exec (блокирует) → Stop
 ```
 
 - **NewApp** принимает подписки прямо в конструктор — все топики известны до старта.
-- **Subscribe** можно вызвать дополнительно, но **до Exec** — иначе воркера не будет.
-- **Init** создаёт канальные очереди и сбрасывает состояние. Безопасно вызывать повторно после `Stop` для сценариев рестарта.
+- **Subscribe** на новый топик нужно вызвать **до Init** — Init создаёт по очереди на топик. Добавлять хендлеры в существующий топик можно в любой момент.
+- **Init** создаёт очереди и сбрасывает состояние. `PublishAsync` работает сразу после `Init`: события буферизуются, пока `Exec` не запустит воркеры, поэтому другие apps могут публиковать, как только движок инициализировал шину. Безопасно вызывать повторно после `Stop` для сценариев рестарта.
 - **Exec** блокирует до отмены `ctx` или вызова `Stop`. Воркеры дрейнят очереди перед выходом.
-- **Stop** идемпотентен и безопасен для вызова до `Init`.
+- **Stop** идемпотентен и безопасен для вызова до `Init`. Если `Exec` так и не запускался, буферизованные события передаются в `OnError` с `ErrAppStopped`.
+
+Каждое событие, переданное в `PublishAsync`, либо доставляется хендлерам, либо попадает в `OnError` — молча не теряется, в том числе при остановке.
 
 ## Подписка
 
@@ -81,13 +84,13 @@ var Subscriptions = []rockbus.Subscription{
     rockbus.On("order.placed", onOrderPlaced),
 }
 
-app := rockbus.NewApp(cfg, Subscriptions...)
+app := rockbus.NewApp(cfg, onError, Subscriptions...)
 ```
 
-### Через Subscribe (до Exec)
+### Через Subscribe (до Init)
 
 ```go
-app.Subscribe("user.created", func(ctx context.Context) error {
+err := app.Subscribe("user.created", func(ctx context.Context) error {
     p, err := rockbus.Payload[UserCreated](ctx)
     if err != nil {
         return err
@@ -96,8 +99,10 @@ app.Subscribe("user.created", func(ctx context.Context) error {
 })
 
 // Или через глобальную функцию
-rockbus.Subscribe("user.created", onUserCreated)
+err = rockbus.Subscribe("user.created", onUserCreated)
 ```
+
+`Subscribe` возвращает ошибку с `ErrNoWorker` для **нового** топика после `Init` (у него не было бы очереди) и для nil-хендлера.
 
 На один топик можно зарегистрировать несколько хендлеров — все вызываются в порядке регистрации.
 
@@ -201,7 +206,7 @@ func onUserCreated(ctx context.Context) error {
 ```go
 errors.Is(err, rockbus.ErrQueueFull)  // очередь топика заполнена, событие дропнуто
 errors.Is(err, rockbus.ErrAppStopped) // приложение остановлено, событие дропнуто
-errors.Is(err, rockbus.ErrNoWorker)   // у топика нет воркера (Subscribe после Exec)
+errors.Is(err, rockbus.ErrNoWorker)   // у топика нет воркера (Subscribe после Init)
 errors.Is(err, rockbus.ErrPanic)      // хендлер запаниковал, паника перехвачена
 errors.Is(err, rockbus.ErrPayload)    // payload отсутствует или тип не совпадает
 ```
@@ -209,18 +214,18 @@ errors.Is(err, rockbus.ErrPayload)    // payload отсутствует или �
 ### Хук OnError
 
 ```go
-rockbus.NewApp(rockbus.Config{
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
-        switch {
-        case errors.Is(err, rockbus.ErrQueueFull):
-            metrics.Inc("bus.queue_full", "topic", string(event.Topic))
-        case errors.Is(err, rockbus.ErrPanic):
-            log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        default:
-            log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        }
-    },
-})
+onError := func(ctx context.Context, event rockbus.Event, err error) {
+    switch {
+    case errors.Is(err, rockbus.ErrQueueFull):
+        metrics.Inc("bus.queue_full", "topic", string(event.Topic))
+    case errors.Is(err, rockbus.ErrPanic):
+        log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    default:
+        log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    }
+}
+
+app := rockbus.NewApp(cfg, onError, subs...)
 ```
 
 `OnError` вызывается только для асинхронных ошибок. `Publish` (sync) возвращает ошибки напрямую вызывающему.
@@ -238,7 +243,8 @@ rockbus.NewApp(rockbus.Config{
 
 ## Ограничения
 
-- **Subscribe после Exec**: топики, зарегистрированные после старта `Exec`, не получают воркера. `PublishAsync` вызовет `OnError` с `ErrNoWorker`. `Publish` по-прежнему работает — он выполняется в горутине вызывающего.
+- **In-memory, at-most-once**: события, оставшиеся в очереди при падении процесса, теряются. Если нужна надёжность — используйте брокер.
+- **Новые топики после Init**: топики, впервые подписанные после `Init`, не получают очереди. `PublishAsync` вызовет `OnError` с `ErrNoWorker`. `Publish` по-прежнему работает — он выполняется в горутине вызывающего.
 - **Один воркер на топик**: если один топик получает события быстрее чем хендлер успевает обработать — очередь заполняется. Это сигнал вынести обработку в отдельный сервис. См. `ErrQueueFull`.
 - **Нет wildcard-топиков**: подписка на `"user.*"` не поддерживается. Используй явные имена топиков.
 - **Нет отписки**: хендлеры нельзя удалить после регистрации.

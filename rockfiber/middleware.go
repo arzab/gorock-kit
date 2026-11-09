@@ -32,17 +32,19 @@ func RecoverHandler() fiber.Handler {
 	return recover.New(recover.Config{
 		EnableStackTrace: true,
 		StackTraceHandler: func(c *fiber.Ctx, e interface{}) {
-			_, _ = os.Stderr.WriteString(fmt.Sprintf("panic: %v\n%s\n", e, debug.Stack()))
+			_, _ = fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", e, debug.Stack())
 		},
 	})
 }
 
-// PprofHandler registers pprof routes under the given path prefix.
+// PprofHandler serves pprof routes under prefix + "/debug/pprof".
+// It answers requests itself, so mount it after any auth middleware.
 func PprofHandler(prefix string) fiber.Handler {
 	return pprof.New(pprof.Config{Prefix: prefix})
 }
 
-// CorsHandler returns a CORS middleware. Passing nil uses the fiber default policy.
+// CorsHandler returns a CORS middleware. Passing nil uses the fiber default policy
+// (all origins). FiberApp only installs it when Config.CorsConfig is set.
 func CorsHandler(cfg *cors.Config) fiber.Handler {
 	if cfg != nil {
 		return cors.New(*cfg)
@@ -60,6 +62,8 @@ func MetricsHandler(cfg *monitor.Config) fiber.Handler {
 
 // TraceIdMiddleware generates a new X-Trace-Id UUID for each request, or propagates
 // an existing one if already present in the incoming request headers.
+// The ID is stored in the response header, in c.Locals(TraceIdKey) and in
+// c.UserContext() (read it with TraceIdFromContext).
 // Incoming values are sanitised: values longer than 64 chars or containing
 // control characters (e.g. newlines) are rejected and a fresh UUID is generated instead.
 func TraceIdMiddleware() fiber.Handler {
@@ -70,8 +74,22 @@ func TraceIdMiddleware() fiber.Handler {
 		}
 		c.Set(TraceIdKey, traceId)
 		c.Locals(TraceIdKey, traceId)
+		c.SetUserContext(context.WithValue(c.UserContext(), traceIdCtxKey{}, traceId))
 		return c.Next()
 	}
+}
+
+type traceIdCtxKey struct{}
+
+// TraceIdFromContext returns the trace ID set by TraceIdMiddleware, or "" if
+// there is none. Use it with c.UserContext() or any context derived from it —
+// for example to attach the trace ID to a logger:
+//
+//	ctx := c.UserContext()
+//	ctx = rocklog.WithContext(ctx, rocklog.Str("trace_id", rockfiber.TraceIdFromContext(ctx)))
+func TraceIdFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(traceIdCtxKey{}).(string)
+	return id
 }
 
 // isValidTraceId checks that a client-supplied trace ID is safe to log and propagate.
@@ -120,8 +138,9 @@ func RequestTimeoutMiddleware(d time.Duration) fiber.Handler {
 
 // ErrorHandler returns a fiber error handler that serialises errors as ErrorResponse JSON.
 //
-// maskMessage, when non-empty, replaces raw internal server error messages.
-// The original message is still shown when the ?debug= query param is present.
+// maskMessage, when non-empty, replaces raw internal server error messages in
+// responses. The original message is still passed to onError. Clients cannot
+// bypass the mask.
 //
 // onError is an optional callback invoked for every error response — use it to integrate
 // rocklog or any other logger without coupling rockfiber to a specific library.
@@ -140,15 +159,19 @@ func ErrorHandler(
 			errResp = NewError(fiberErr.Code, fiberErr.Message)
 		default:
 			msg := err.Error()
-			if maskMessage != "" && c.Query("debug") == "" {
-				msg = maskMessage
-			}
 			errResp = NewError(http.StatusInternalServerError, msg).WithSource("internal")
 		}
 
 		if onError != nil {
 			traceId, _ := c.Locals(TraceIdKey).(string)
 			onError(traceId, errResp)
+		}
+
+		// Mask after onError so logs keep the real message.
+		if maskMessage != "" && errResp.Code == http.StatusInternalServerError && errResp.Source == "internal" {
+			masked := *errResp
+			masked.Message = maskMessage
+			errResp = &masked
 		}
 
 		return c.Status(errResp.Code).JSON(errResp)

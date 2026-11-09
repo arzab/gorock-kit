@@ -55,7 +55,7 @@ type Logger interface {
 	Named(name string) Logger
 }
 
-// New creates a Logger backed by logrus with the given configuration.
+// New creates a Logger backed by log/slog with the given configuration.
 func New(cfg Config) Logger {
-	return newLogrusLogger(cfg, 0)
+	return newSlogLogger(cfg, 0)
 }

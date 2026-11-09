@@ -79,7 +79,7 @@ app := rockfiber.New(*cfg,
 |----------|------------------------------|
 | `port`, `admin_password` | `App fiber.Config` |
 | `endpoints_path_prefix`, `admin_endpoints_path` | `RateLimit`, `CorsConfig` |
-| `use_trace_id`, `compress`, `helmet` | `Swagger`, `MonitoringConfig` |
+| `use_trace_id`, `compress`, `helmet`, `pprof` | `Swagger`, `MonitoringConfig` |
 | `request_timeout`, `shutdown_timeout` | `NotFound`, `OnRequest`, `OnError` |
 | `tls_cert_file`, `tls_key_file` | |
 | `mask_internal_server_error_message` | |
@@ -104,6 +104,8 @@ type Config struct {
     Compress bool // сжатие ответов: gzip/deflate/brotli
     Helmet   bool // security headers: X-Frame-Options, CSP, HSTS и др.
 
+    Pprof bool // pprof по адресу <AdminEndpointsPath>/debug/pprof/, за admin-паролем; по умолчанию выключен
+
     // Endpoint-middlewares (только маршруты под EndpointsPathPrefix).
     UseTraceId     bool
     RequestTimeout time.Duration   // deadline контекста; 0 = выключено
@@ -111,7 +113,7 @@ type Config struct {
 
     Swagger          *SwaggerConfig
     MonitoringConfig *monitor.Config
-    CorsConfig       *cors.Config   // nil = разрешить все origins (см. раздел CORS)
+    CorsConfig       *cors.Config   // nil = CORS выключен (см. раздел CORS)
 
     MaskInternalServerErrorMessage string        // маскировка 500-ошибок; см. Обработка ошибок
     NotFound                       fiber.Handler // catch-all для несуществующих маршрутов
@@ -269,9 +271,7 @@ Config{
 }
 ```
 
-Реальное сообщение об ошибке видно при добавлении `?debug=` к URL запроса — удобно для диагностики в любом окружении без перезапуска.
-
-> Если `MaskInternalServerErrorMessage` не задан, реальные ошибки видны всегда — `?debug=` роли не играет.
+Маскируются только неожиданные ошибки (500 с source `internal`); возвращённые вами `ErrorResponse` и `fiber.Error` сохраняют своё сообщение. Клиент не может обойти маскировку. `OnError` всегда получает реальное сообщение — логируйте там.
 
 ### Кастомный error handler
 
@@ -389,7 +389,7 @@ Config{Helmet: true}
 | Маршрут                    | Описание                      |
 |----------------------------|-------------------------------|
 | `GET /admin/metrics`       | Fiber monitor dashboard       |
-| `GET /admin/debug/pprof/*` | Go pprof endpoints            |
+| `GET /admin/debug/pprof/*` | Go pprof endpoints (только при `Pprof: true`) |
 
 Если `AdminPassword` пустой — все запросы к admin возвращают 401.
 
@@ -402,8 +402,11 @@ Config{Helmet: true}
 ## CORS
 
 ```go
-// Разрешить все origins (по умолчанию — подходит для публичных API без credentials)
+// Без CORS middleware (по умолчанию) — браузер блокирует кросс-доменные запросы
 Config{CorsConfig: nil}
+
+// Явно разрешить все origins (публичный API без credentials)
+Config{CorsConfig: &cors.Config{}}
 
 // Ограничить origins
 Config{
@@ -414,7 +417,7 @@ Config{
 }
 ```
 
-> **Предупреждение:** Дефолтная политика CORS (`nil`) разрешает все origins (`*`). Если API использует куки или заголовок `Authorization` в браузерных клиентах — всегда задавайте `CorsConfig` явно.
+> **Изменено:** раньше `nil` разрешал все origins (`*`). Теперь CORS-заголовки не отправляются, пока не задан `CorsConfig`. Запросы с того же origin и не-браузерные клиенты не затронуты.
 
 ## Хелперы контекста
 
@@ -424,7 +427,12 @@ rockfiber.HandlerInitInCtx[MyStruct]("my-key")
 
 // Получить его в следующем хендлере (типобезопасно)
 val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
+
+// Trace ID (при UseTraceId) из любого контекста, производного от c.UserContext()
+id := rockfiber.TraceIdFromContext(c.UserContext())
 ```
+
+Передавайте `c.UserContext()` в сервисы, чтобы они могли прочитать trace ID — например, добавить его в логгер через `rocklog.WithContext`.
 
 ## Восстановление после паники
 
@@ -437,4 +445,3 @@ val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
 - `RequestTimeout` устанавливает deadline контекста, но не прерывает горутину принудительно. Хендлеры, игнорирующие `ctx.Done()`, выполняются до конца.
 - `Helmet: true` + Swagger UI могут конфликтовать по `Content-Security-Policy`.
 - `EndpointsPathPrefix` не должен совпадать с `/status` или `AdminEndpointsPath`.
-- `?debug=` в URL показывает реальное сообщение об ошибке когда задан `MaskInternalServerErrorMessage`. При необходимости ограничьте это на уровне gateway.

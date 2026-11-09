@@ -1,10 +1,10 @@
 # rocklog
 
-Structured logging for Go with a clean interface, logrus backend, and global or instance-based usage.
+Structured logging for Go with a clean interface, a `log/slog` backend, and global or instance-based usage.
 
 ## Overview
 
-`rocklog` wraps any logging backend behind a `Logger` interface. The default backend is [logrus](https://github.com/sirupsen/logrus). Logs are always structured with typed fields — no format strings required. The log level is always present in the output automatically.
+`rocklog` wraps any logging backend behind a `Logger` interface. The default backend is the standard library's [`log/slog`](https://pkg.go.dev/log/slog) — no third-party dependencies. Logs are always structured with typed fields — no format strings required. The log level is always present in the output automatically.
 
 ## Quick Start
 
@@ -88,7 +88,7 @@ Plug in any custom `Logger` implementation:
 rocklog.SetDefault(myZapAdapter)
 ```
 
-> **Note:** if you use `SetDefault(rocklog.New(cfg))` with `Caller: true`, the reported call site will be inside `rocklog` rather than your code. Use `Init(cfg)` instead when you want the default logrus backend with caller reporting.
+> **Note:** if you use `SetDefault(rocklog.New(cfg))` with `Caller: true`, the reported call site will be inside `rocklog` rather than your code. Use `Init(cfg)` instead when you want the default backend with caller reporting.
 
 ## Structured Fields
 
@@ -96,7 +96,7 @@ Every log method accepts zero or more `Field` values. Use the provided helpers:
 
 | Helper                         | Description                          |
 |--------------------------------|--------------------------------------|
-| `F(key, val)`                  | Any value                            |
+| `F(key, val)` / `Any(key, val)` | Any value                            |
 | `Err(err)`                     | Error under key `"error"`            |
 | `Str(key, val)`                | String                               |
 | `Int(key, val)`                | int                                  |
@@ -139,7 +139,7 @@ log := rocklog.New(cfg).With(
     rocklog.Str("env", "prod"),
 )
 log.Info("charge created", rocklog.Int("amount", 100))
-// → level=info service=payments env=prod amount=100 msg="charge created"
+// → level=info msg="charge created" service=payments env=prod amount=100
 ```
 
 Chain `With` calls to add more fields:
@@ -155,10 +155,27 @@ reqLog.Error("handler failed", rocklog.Err(err))
 ```go
 db := rocklog.Named("database")
 db.Info("query executed", rocklog.Dur("took", d))
-// → level=info logger=database took=2ms msg="query executed"
+// → level=info msg="query executed" logger=database took=2ms
 ```
 
 > Calling `Named` again on a named logger overwrites the previous name.
+
+### Context — request-scoped loggers
+
+Carry a logger with request fields through `context.Context` instead of passing it explicitly:
+
+```go
+// in middleware
+ctx = rocklog.WithContext(ctx, rocklog.Str("trace_id", traceId))
+
+// anywhere below
+rocklog.FromContext(ctx).Info("user created", rocklog.Str("id", id))
+// → level=info msg="user created" trace_id=... id=...
+```
+
+- `WithContext` adds fields to the logger already in `ctx` (or to the default logger).
+- `ContextWithLogger(ctx, l)` stores a specific logger.
+- `FromContext` never returns nil — without a stored logger it returns the default one.
 
 ## Level Checking
 
@@ -201,18 +218,21 @@ Enable `Caller: true` in `Config` to include `file:line` in every entry:
 ```go
 rocklog.Init(rocklog.Config{Caller: true})
 rocklog.Info("hello")
-// → caller=main.go:42 level=info msg=hello
+// → level=info msg=hello caller=main.go:42
 ```
 
 Loggers created with `New` and loggers returned by `With` / `Named` always report the correct call site. The global logger (`Init`) also reports correctly.
 
 ## Fatal Behaviour
 
-`Fatal` logs the message and then calls `os.Exit(1)`. Deferred functions are **not** executed. Use it only for truly unrecoverable startup failures.
+`Fatal` logs the message and then calls `os.Exit(1)`. Deferred functions are **not** executed. Use it only for truly unrecoverable startup failures, before the engine runs.
+
+> **With rockengine:** never call `Fatal` from inside an app — it skips graceful shutdown of every other app (open requests are cut, queued events are lost). Return an error from `Exec` instead and let the engine's restart policy / `StopOnFatal` handle it.
 
 ## Limitations
 
 - **`Err(nil)`** is logged as `"error": null`, not omitted. Guard it yourself: `if err != nil { fields = append(fields, rocklog.Err(err)) }`.
 - **`Stringer` with a nil-pointer receiver** may panic if the underlying `String()` method does not handle nil. Avoid passing nil-pointer values wrapped in a non-nil interface.
 - **`SetDefault` with a custom Logger and `Caller: true`** will report `rocklog/default.go` as the call site. Use `Init` or implement caller-skip inside your adapter.
-- **Embedded logrus** — concurrent calls to `Init` / `SetDefault` while logging is happening are safe (protected by `sync.RWMutex`), but should be avoided in production.
+- **Concurrent `Init` / `SetDefault`** while logging is happening is safe (protected by `sync.RWMutex`), but should be avoided in production.
+- **Output format** — level names (`debug`, `info`, `warning`, `error`, `fatal`) and field-override semantics match the previous logrus backend. Differences: text output prints `msg` before the fields and does not sort them; default timestamps use slog's RFC 3339 format with milliseconds.

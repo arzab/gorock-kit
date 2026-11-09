@@ -16,12 +16,13 @@ var Subscriptions = []rockbus.Subscription{
 }
 
 // Create App with subscriptions
-app := rockbus.NewApp(rockbus.Config{
-    QueueSize: 1024,
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
+app := rockbus.NewApp(
+    rockbus.Config{QueueSize: 1024},
+    func(ctx context.Context, event rockbus.Event, err error) {
         log.Error("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
     },
-}, Subscriptions...)
+    Subscriptions...,
+)
 
 // Set as global default
 rockbus.SetDefault(app)
@@ -48,14 +49,16 @@ type Config struct {
 ## Lifecycle
 
 ```
-NewApp(cfg, subs...) → SetDefault → Init → Exec (blocks) → Stop
+NewApp(cfg, onError, subs...) → SetDefault → Init → Exec (blocks) → Stop
 ```
 
 - **NewApp** accepts subscriptions directly — all topics are known before startup.
-- **Subscribe** can be called additionally, but **before Exec** — otherwise no worker is created.
-- **Init** allocates the queue channels and resets state. Safe to call again after `Stop` for restart scenarios.
+- **Subscribe** for a new topic must happen **before Init** — Init creates one queue per topic. Adding handlers to an existing topic works any time.
+- **Init** creates the queues and resets state. `PublishAsync` works right after `Init`: events are buffered until `Exec` starts the workers, so other apps may publish as soon as the engine has initialised the bus. Safe to call again after `Stop` for restart scenarios.
 - **Exec** blocks until `ctx` is cancelled or `Stop` is called. Workers drain their queues before exiting.
-- **Stop** is idempotent and safe to call before `Init`.
+- **Stop** is idempotent and safe to call before `Init`. If `Exec` never ran, buffered events are reported to `OnError` with `ErrAppStopped`.
+
+Every event passed to `PublishAsync` is either delivered to its handlers or reported to `OnError` — never dropped silently, including during shutdown.
 
 ## Subscribing
 
@@ -81,13 +84,13 @@ var Subscriptions = []rockbus.Subscription{
     rockbus.On("order.placed", onOrderPlaced),
 }
 
-app := rockbus.NewApp(cfg, Subscriptions...)
+app := rockbus.NewApp(cfg, onError, Subscriptions...)
 ```
 
-### Via Subscribe (before Exec)
+### Via Subscribe (before Init)
 
 ```go
-app.Subscribe("user.created", func(ctx context.Context) error {
+err := app.Subscribe("user.created", func(ctx context.Context) error {
     p, err := rockbus.Payload[UserCreated](ctx)
     if err != nil {
         return err
@@ -96,8 +99,10 @@ app.Subscribe("user.created", func(ctx context.Context) error {
 })
 
 // Or via the package-level function
-rockbus.Subscribe("user.created", onUserCreated)
+err = rockbus.Subscribe("user.created", onUserCreated)
 ```
+
+`Subscribe` returns an error wrapping `ErrNoWorker` for a **new** topic after `Init` (it would have no queue), and for a nil handler.
 
 Multiple handlers can be registered for the same topic — all are called in registration order.
 
@@ -201,7 +206,7 @@ func onUserCreated(ctx context.Context) error {
 ```go
 errors.Is(err, rockbus.ErrQueueFull)  // topic queue is full, event dropped
 errors.Is(err, rockbus.ErrAppStopped) // app stopped, event dropped
-errors.Is(err, rockbus.ErrNoWorker)   // topic has no worker (Subscribe after Exec)
+errors.Is(err, rockbus.ErrNoWorker)   // topic has no worker (Subscribe after Init)
 errors.Is(err, rockbus.ErrPanic)      // handler panicked, panic recovered
 errors.Is(err, rockbus.ErrPayload)    // payload missing or wrong type
 ```
@@ -209,18 +214,18 @@ errors.Is(err, rockbus.ErrPayload)    // payload missing or wrong type
 ### OnError hook
 
 ```go
-rockbus.NewApp(rockbus.Config{
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
-        switch {
-        case errors.Is(err, rockbus.ErrQueueFull):
-            metrics.Inc("bus.queue_full", "topic", string(event.Topic))
-        case errors.Is(err, rockbus.ErrPanic):
-            log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        default:
-            log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        }
-    },
-})
+onError := func(ctx context.Context, event rockbus.Event, err error) {
+    switch {
+    case errors.Is(err, rockbus.ErrQueueFull):
+        metrics.Inc("bus.queue_full", "topic", string(event.Topic))
+    case errors.Is(err, rockbus.ErrPanic):
+        log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    default:
+        log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    }
+}
+
+app := rockbus.NewApp(cfg, onError, subs...)
 ```
 
 `OnError` is called for async errors only. `Publish` (sync) returns errors directly to the caller.
@@ -238,7 +243,8 @@ The stack trace is included in the error message.
 
 ## Limitations
 
-- **Subscribe after Exec**: topics registered after `Exec` starts have no worker. `PublishAsync` calls `OnError` with `ErrNoWorker`. `Publish` still works — it runs in the caller's goroutine.
+- **In-memory, at-most-once**: events still queued when the process dies are lost. Use a broker if you need durability.
+- **New topics after Init**: topics first subscribed after `Init` have no queue. `PublishAsync` calls `OnError` with `ErrNoWorker`. `Publish` still works — it runs in the caller's goroutine.
 - **One worker per topic**: if a single topic receives events faster than the handler can process them, the queue fills up. This is a signal to move that handler to a separate service. See `ErrQueueFull`.
 - **No wildcard topics**: subscribing to `"user.*"` is not supported. Use explicit topic names.
 - **No unsubscribe**: handlers cannot be removed after registration.

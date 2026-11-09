@@ -11,11 +11,14 @@ svc := rockredis.NewService(rockredis.Configs{
     DB:       0,
 })
 
-ctx := context.Background()
-if err := svc.Ping(ctx); err != nil {
+// С rockengine: инициализируется до apps, закрывается после них.
+rockengine.RegisterResource("redis", svc)
+
+// Без движка:
+if err := svc.Init(ctx); err != nil { // создаёт клиент и делает ping
     log.Fatal(err)
 }
-defer svc.Close()
+defer svc.Stop()
 ```
 
 ## Загрузка конфига из файла
@@ -195,6 +198,7 @@ svc := rockredis.NewService(rockredis.Configs{
 
 ## Ограничения
 
+- `Init` закрывает клиент, если `Ping` не прошёл; повторный `Init` заменяет и закрывает предыдущий клиент. После `Stop` вызовы возвращают `redis: client is closed`.
 - `Subscribe.Channel()` — буферизированный горутинный мост; медленный консьюмер может задержать доставку сообщений.
 - `TLSEnabled: true` использует системный пул сертификатов; взаимный TLS требует кастомной настройки.
-- `ZRank` работает в порядке возрастания. Для убывающего порядка используйте `ZRevRank` через go-redis напрямую.
+- `ZRank` работает в порядке возрастания. Для убывающего порядка, как и для любой команды, которой нет в интерфейсе `Service`, используйте клиент go-redis: `rockredis.Client(svc).ZRevRank(ctx, key, member)`. До `Init` `Client` возвращает `nil`.

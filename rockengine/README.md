@@ -78,21 +78,31 @@ func main() {
 }
 ```
 
-`Run` blocks until `SIGINT` / `SIGTERM` is received, then gracefully stops all apps in reverse registration order.
+`Run` blocks until `SIGINT` / `SIGTERM` is received (or an app fails, see below), then gracefully stops all apps in reverse registration order.
 
 ## Restart Policy
 
-By default, a failing app is marked as `failed` and the engine keeps running. To enable automatic restarts:
+By default, an app whose `Exec` returns an error (or panics) is not restarted: it is marked as `failed`, its `Stop` is called, and the **whole engine shuts down** — `Run` returns an error naming the app. This lets an orchestrator (systemd, Kubernetes) restart a process that lost a component instead of leaving it half-alive.
+
+To enable automatic restarts:
 
 ```go
 rockengine.Register("worker", &WorkerApp{}, rockengine.RestartPolicy{
-    MaxRetries: -1,              // -1 = unlimited, 0 = no restart (default), N = up to N times
+    MaxRetries: -1,               // -1 = unlimited, 0 = no restart (default), N = up to N times
     Delay:      2 * time.Second,
-    OnFatal: func(err error) {  // called when retries are exhausted (overrides engine-level handler)
+    ResetAfter: time.Minute,      // a run that lasted >=1m resets the retry counter; 0 = never reset
+    OnFatal: func(err error) {   // called when the app is marked failed (overrides engine-level handler)
         log.Printf("worker is dead: %v", err)
     },
 })
 ```
+
+- A restart is `Stop → Delay → Init → Exec`. Every successful `Init` is matched by exactly one `Stop`.
+- A panic in `Exec` counts as a failure and follows the policy. Panics in `Init`, `Stop` and fatal handlers are recovered and reported as errors.
+- Whatever `Exec` returns after its `ctx` was cancelled (`nil`, `ctx.Err()`, `http.ErrServerClosed`, ...) is a clean stop, never a failure.
+- Without `ResetAfter`, `MaxRetries` counts failures over the whole process lifetime.
+
+To keep the engine running when an app fails, use `SetStopOnFatal(false)` / `WithStopOnFatal(false)` and observe failures via the fatal handler or `AppStatuses`.
 
 ## Custom Engine
 
@@ -101,6 +111,7 @@ For more control, create an `Engine` directly:
 ```go
 engine := rockengine.NewEngine().
     WithShutdownTimeout(15 * time.Second).
+    WithStopOnFatal(false). // keep other apps running when one fails
     WithFatalHandler(func(name string, err error) {
         log.Printf("app %s is dead: %v", name, err)
     })
@@ -112,6 +123,32 @@ if err := engine.Run(); err != nil {
     log.Fatal(err)
 }
 ```
+
+## Resources
+
+Dependencies without their own run loop — database pools, cache clients — are registered as **resources**:
+
+```go
+type Resource interface {
+    Init(ctx context.Context) error
+    Stop() error
+}
+```
+
+```go
+db := rockbun.NewService(cfg.DB)
+cache := rockredis.NewService(cfg.Redis)
+
+rockengine.RegisterResource("db", db)
+rockengine.RegisterResource("redis", cache)
+rockengine.Register("http", server)
+```
+
+- Resources are initialised **before** any app, in registration order. An `Init` error stops startup and closes the resources already initialised.
+- Resources are stopped **after** every app has stopped, in reverse order — the HTTP server finishes in-flight requests before the pool they use is closed.
+- Resource `Stop` is covered by the shutdown timeout; errors are returned from `Run`.
+- Resources are not restarted and have no state in `AppStatuses`.
+- `rockbun.Service` and `rockredis.Service` satisfy `Resource`.
 
 ## Orchestration
 
@@ -142,7 +179,7 @@ for _, info := range rockengine.AppStatuses() {
 | `running`    | `Exec` is active                                 |
 | `restarting` | Waiting between restart attempts                 |
 | `stopped`    | Stopped cleanly                                  |
-| `failed`     | Exceeded restart limit or fatal error in `Init`  |
+| `failed`     | Exceeded restart limit or re-`Init` failed       |
 
 ## API Reference
 
@@ -160,6 +197,8 @@ for _, info := range rockengine.AppStatuses() {
 | `Shutdown() []error`                              | Stop all apps                            |
 | `SetShutdownTimeout(d)`                           | Set global shutdown timeout (default 30s)|
 | `SetFatalHandler(fn)`                             | Set handler for fatal app failures       |
+| `SetStopOnFatal(bool)`                            | Shut down the engine when an app fails (default `true`) |
+| `RegisterResource(name, res)`                     | Register a resource (init first, stop last) |
 
 ### Engine methods
 
@@ -170,11 +209,18 @@ Same as above, plus:
 | `NewEngine() *Engine`         | Create a new engine             |
 | `WithShutdownTimeout(d)`      | Set shutdown timeout            |
 | `WithFatalHandler(fn)`        | Set fatal handler               |
+| `WithStopOnFatal(bool)`       | Shut down on app failure (default `true`) |
+| `RegisterResource` / `MustRegisterResource` | Register a resource |
 
 ## Shutdown Contract
 
-- `ctx` cancellation signals `Exec` to stop accepting new work and finish in-flight operations.
-- `Stop` is called immediately after to unblock a blocking `Exec` (e.g. `server.Shutdown`).
-- `Stop` must not forcefully cut ongoing work — the engine enforces a timeout as a last resort.
-- `Stop` should be idempotent.
-- Apps are stopped in **reverse** registration order to respect inverse dependencies.
+Apps are stopped **one at a time** in reverse registration order. For each app:
+
+1. its `ctx` is cancelled — `Exec` should stop accepting new work and finish in-flight operations;
+2. `Stop` is called right after, to unblock a blocking `Exec` (e.g. `server.Shutdown`);
+3. the engine waits for `Exec` to return before moving on to the previous app.
+
+So an HTTP server registered after the event bus is fully stopped before the bus is touched.
+
+- `Stop` must not forcefully cut ongoing work. The shutdown timeout (default 30s) covers the whole sequence including `Stop` calls; on timeout `Run` returns an error naming the app that hung.
+- The engine calls `Stop` at most once per successful `Init`, but `Stop` may run concurrently with `Exec` — it must be safe for that.

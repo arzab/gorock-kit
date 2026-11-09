@@ -11,11 +11,14 @@ svc := rockbun.NewService(rockbun.Configs{
     DSN: "postgres://user:pass@localhost:5432/mydb?sslmode=disable",
 })
 
-ctx := context.Background()
-if err := svc.Ping(ctx); err != nil {
+// With rockengine: initialised before apps, closed after them.
+rockengine.RegisterResource("db", svc)
+
+// Standalone:
+if err := svc.Init(ctx); err != nil { // opens the pool and pings
     log.Fatal(err)
 }
-defer svc.Close()
+defer svc.Stop()
 
 db := svc.DB() // *bun.DB — use for all queries
 ```
@@ -67,7 +70,7 @@ type Configs struct {
     User     string
     Password string
     Database string
-    SSLMode  string // default "disable"
+    SSLMode  string // default "disable"; use "verify-full" in production
 
     MaxOpenConns    int           // default 25
     MaxIdleConns    int           // default 5
@@ -178,5 +181,8 @@ See the [bun migrations guide](https://bun.uptrace.dev/guide/migrations.html) fo
 
 ## Limitations
 
+- `Init` closes the pool again if `Ping` fails (`DB()` stays `nil`); calling `Init` again replaces and closes the previous pool. After `Stop`, queries return `sql: database is closed`.
+- User, password and database from individual fields are URL-escaped, so passwords with `@`, `:`, `/` or `#` work. A hand-written `DSN` must be escaped by you.
+- `SSLMode` defaults to `disable`. In pgdriver `prefer` / `require` encrypt but do **not** verify the server certificate (and `prefer` does not fall back to plaintext). Use `verify-full` for real protection.
 - PostgreSQL only (via `pgdriver`). For MySQL or SQLite, use `bun.NewDB` directly with the appropriate driver and pass the `*bun.DB` through a custom wrapper.
 - `QueryHooks` are applied at construction time; they cannot be added or removed after `NewService`.

@@ -60,6 +60,10 @@ type Config struct {
 	Compress bool `config:",omitempty"` // gzip/deflate/brotli compression
 	Helmet   bool `config:",omitempty"` // security headers: X-Frame-Options, CSP, HSTS, etc.
 
+	// Pprof exposes Go profiling endpoints at <AdminEndpointsPath>/debug/pprof/,
+	// behind the admin password. Disabled by default: profiles reveal memory contents.
+	Pprof bool `config:",omitempty"`
+
 	// Endpoint middlewares (routes under EndpointsPathPrefix only).
 	UseTraceId     bool          `config:",omitempty"`
 	RequestTimeout time.Duration `config:",omitempty"` // context deadline; 0 = disabled
@@ -68,10 +72,10 @@ type Config struct {
 	RateLimit        *limiter.Config `config:"-"` // nil = disabled
 	Swagger          *SwaggerConfig  `config:"-"` // nil = disabled
 	MonitoringConfig *monitor.Config `config:"-"` // nil = default
-	CorsConfig       *cors.Config    `config:"-"` // nil = allow all origins
+	CorsConfig       *cors.Config    `config:"-"` // nil = CORS disabled (browsers block cross-origin requests)
 
 	// MaskInternalServerErrorMessage replaces raw 500 messages in responses.
-	// The real message is still visible via ?debug= query param.
+	// The real message is still passed to OnError for logging.
 	MaskInternalServerErrorMessage string `config:",omitempty"`
 
 	// Must be set in code — function types.
@@ -88,16 +92,22 @@ type Config struct {
 type FiberApp struct {
 	cfg       Config
 	endpoints []FiberEndpoint
-	fiber     *fiber.App
-	stopOnce  sync.Once
+
+	// mu guards the per-Init state below. Init replaces all of it, so a
+	// restarted server gets a fresh fiber instance and a fresh stop guard.
+	mu       sync.Mutex
+	fiber    *fiber.App
+	stopOnce *sync.Once
+	execd    bool // Exec was called since the last Init
 }
 
 // New creates a FiberApp with the given config and endpoints.
-// Pass endpoints via NewEndpoint, GET, POST, etc.
-func New(cfg Config) *FiberApp {
-	return &FiberApp{cfg: cfg}
+// Pass endpoints via NewEndpoint, GET, POST, etc., or later via SetEndpoints.
+func New(cfg Config, endpoints ...FiberEndpoint) *FiberApp {
+	return &FiberApp{cfg: cfg, endpoints: endpoints}
 }
 
+// SetEndpoints replaces the endpoints. Call it before Exec.
 func (a *FiberApp) SetEndpoints(endpoints []FiberEndpoint) {
 	a.endpoints = endpoints
 }
@@ -125,43 +135,54 @@ func (a *FiberApp) Init(_ context.Context) error {
 		fiberCfg.ErrorHandler = ErrorHandler(a.cfg.MaskInternalServerErrorMessage, a.cfg.OnError)
 	}
 
-	a.fiber = fiber.New(fiberCfg)
+	f := fiber.New(fiberCfg)
 
 	// Global middlewares — applied to every route including admin and /status.
-	a.fiber.Use(RecoverHandler())
-	a.fiber.Use(PprofHandler(adminPath))
-	a.fiber.Use(CorsHandler(a.cfg.CorsConfig))
+	f.Use(RecoverHandler())
+	if a.cfg.CorsConfig != nil {
+		f.Use(CorsHandler(a.cfg.CorsConfig))
+	}
 
 	if a.cfg.Compress {
-		a.fiber.Use(compress.New())
+		f.Use(compress.New())
 	}
 	if a.cfg.Helmet {
-		a.fiber.Use(helmet.New())
+		f.Use(helmet.New())
 	}
 
+	a.mu.Lock()
+	a.fiber = f
+	a.stopOnce = &sync.Once{}
+	a.execd = false
+	a.mu.Unlock()
 	return nil
 }
 
 // Exec registers endpoints and starts the HTTP server.
 // Blocks until ctx is cancelled or the server exits with an error.
 func (a *FiberApp) Exec(ctx context.Context) error {
-	if a.fiber == nil {
+	a.mu.Lock()
+	f := a.fiber
+	if f == nil {
+		a.mu.Unlock()
 		return fmt.Errorf("rockfiber: Init must be called before Exec")
 	}
-
-	if a.endpoints == nil {
-		return fmt.Errorf("rockfiber: SetEndpoints must be called before Exec")
+	if a.execd {
+		a.mu.Unlock()
+		return fmt.Errorf("rockfiber: Init must be called before each Exec")
 	}
+	a.execd = true
+	a.mu.Unlock()
 
-	a.setupEndpoints()
+	a.setupEndpoints(f)
 
 	listenErr := make(chan error, 1)
 	go func() {
 		addr := fmt.Sprintf(":%s", a.cfg.Port)
 		if a.cfg.TLSCertFile != "" && a.cfg.TLSKeyFile != "" {
-			listenErr <- a.fiber.ListenTLS(addr, a.cfg.TLSCertFile, a.cfg.TLSKeyFile)
+			listenErr <- f.ListenTLS(addr, a.cfg.TLSCertFile, a.cfg.TLSKeyFile)
 		} else {
-			listenErr <- a.fiber.Listen(addr)
+			listenErr <- f.Listen(addr)
 		}
 	}()
 
@@ -182,25 +203,30 @@ func (a *FiberApp) Stop() []error {
 	return nil
 }
 
+// shutdown stops the server created by the latest Init exactly once.
+// Concurrent callers block until the first shutdown completes (sync.Once).
 func (a *FiberApp) shutdown() error {
-	if a.fiber == nil {
+	a.mu.Lock()
+	f, once := a.fiber, a.stopOnce
+	a.mu.Unlock()
+	if f == nil {
 		// Init was never called or failed — nothing to shut down.
 		return nil
 	}
 	var err error
-	a.stopOnce.Do(func() {
+	once.Do(func() {
 		timeout := a.cfg.ShutdownTimeout
 		if timeout == 0 {
 			timeout = 30 * time.Second
 		}
-		if e := a.fiber.ShutdownWithTimeout(timeout); e != nil {
+		if e := f.ShutdownWithTimeout(timeout); e != nil {
 			err = fmt.Errorf("fiber shutdown: %w", e)
 		}
 	})
 	return err
 }
 
-func (a *FiberApp) setupEndpoints() {
+func (a *FiberApp) setupEndpoints(f *fiber.App) {
 	if sw := a.cfg.Swagger; sw != nil {
 		swPath := sw.Path
 		if swPath != "" && swPath[0] != '/' {
@@ -210,15 +236,20 @@ func (a *FiberApp) setupEndpoints() {
 		swCfg.OAuth = sw.OAuth
 		swCfg.Filter = sw.Filter
 		swCfg.SyntaxHighlight = sw.SyntaxHighlight
-		a.fiber.Get(swPath, swagger.HandlerDefault)
-		a.fiber.Get(swPath+"/*", swagger.New(swCfg))
+		f.Get(swPath, swagger.HandlerDefault)
+		f.Get(swPath+"/*", swagger.New(swCfg))
 	}
 
-	admin := a.fiber.Group(a.cfg.AdminEndpointsPath)
+	admin := f.Group(a.cfg.AdminEndpointsPath)
 	admin.Use(AdminAuthMiddleware(a.cfg.AdminPassword))
+	if a.cfg.Pprof {
+		// Registered after the auth middleware: pprof answers requests itself
+		// without calling Next, so anything before auth would be public.
+		admin.Use(PprofHandler(a.cfg.AdminEndpointsPath))
+	}
 	admin.Get("/metrics", MetricsHandler(a.cfg.MonitoringConfig))
 
-	a.fiber.Get("/status", func(c *fiber.Ctx) error {
+	f.Get("/status", func(c *fiber.Ctx) error {
 		return c.JSON(map[string]interface{}{"status": "ok"})
 	})
 
@@ -226,7 +257,7 @@ func (a *FiberApp) setupEndpoints() {
 	if prefix == "" {
 		prefix = "/"
 	}
-	router := a.fiber.Group(prefix)
+	router := f.Group(prefix)
 
 	// Endpoint-scoped middlewares — applied only to routes under EndpointsPathPrefix.
 	if a.cfg.UseTraceId {
@@ -248,7 +279,7 @@ func (a *FiberApp) setupEndpoints() {
 
 	// Catch-all for unmatched routes — must be registered last.
 	if a.cfg.NotFound != nil {
-		a.fiber.Use(a.cfg.NotFound)
+		f.Use(a.cfg.NotFound)
 	}
 }
 

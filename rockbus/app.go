@@ -18,9 +18,9 @@ var ErrQueueFull = errors.New("rockbus: async queue is full, event dropped")
 var ErrAppStopped = errors.New("rockbus: app is stopped, event dropped")
 
 // ErrNoWorker is passed to OnError when PublishAsync is called for a topic
-// that had no handlers registered before Exec was called.
+// that has no handlers, and returned by Subscribe for a new topic after Init.
 // Fix: pass the Subscription to NewApp or call Subscribe before starting the engine.
-var ErrNoWorker = errors.New("rockbus: no worker for topic, Subscribe must be called before Exec")
+var ErrNoWorker = errors.New("rockbus: no worker for topic, Subscribe must be called before Init")
 
 type asyncJob struct {
 	ctx   context.Context
@@ -34,24 +34,36 @@ type asyncJob struct {
 // guarantees that events within the same topic are processed in order.
 // Different topics are processed concurrently and do not block each other.
 //
+// Delivery is in-memory and at-most-once: events still queued when the
+// process dies are lost. A slow handler delays later events of its topic.
+//
+// Every event passed to PublishAsync is either delivered to the topic's
+// handlers or reported to OnError — never dropped silently.
+//
 // Usage:
 //
-//	app := rockbus.NewApp(cfg,
+//	app := rockbus.NewApp(cfg, onError,
 //	    rockbus.On("user.created", handlers.OnUserCreated),
 //	    rockbus.On("order.placed", handlers.OnOrderPlaced),
 //	)
 //	rockbus.SetDefault(app)
 //	engine.MustRegister("bus", app, rockengine.RestartPolicy{})
 type App struct {
-	cfg      Config
-	onError  func(ctx context.Context, event Event, err error)
-	mu       sync.RWMutex
+	cfg     Config
+	onError func(ctx context.Context, event Event, err error)
+
+	mu       sync.RWMutex // guards handlers
 	handlers map[Topic][]Handler
-	queues   map[Topic]chan asyncJob // one channel per topic, created at Exec time
-	doneMu   sync.Mutex             // guards done, stopOnce, and running
-	done     chan struct{}
-	stopOnce sync.Once
-	running  bool
+
+	// stateMu guards the per-Init state below. PublishAsync holds it for
+	// reading while enqueueing; Stop takes it for writing before closing the
+	// queues, so no send can race with a close.
+	stateMu sync.RWMutex
+	inited  bool                    // Init was called and queues exist
+	stopped bool                    // Stop was called since the last Init
+	running bool                    // Exec is active
+	queues  map[Topic]chan asyncJob // one channel per topic, created in Init
+	stopCh  chan struct{}           // closed by Stop
 }
 
 // NewApp creates an App with the given subscriptions.
@@ -70,78 +82,70 @@ func NewApp(cfg Config, onError func(ctx context.Context, event Event, err error
 	return app
 }
 
-// Init prepares the app for execution.
+// Init creates one queue per subscribed topic. Events published with
+// PublishAsync after Init are buffered until Exec starts the workers, so
+// other apps may publish as soon as the engine has initialised the bus.
 // Safe to call again after Stop — resets internal state for restart.
 func (a *App) Init(_ context.Context) error {
-	a.doneMu.Lock()
-	defer a.doneMu.Unlock()
-
-	a.done = make(chan struct{})
-	a.stopOnce = sync.Once{} // safe under doneMu
-	a.queues = nil
-	return nil
-}
-
-// Exec creates one worker goroutine per registered topic and blocks until
-// ctx is cancelled or Stop is called. Each worker drains its queue before exiting.
-//
-// All subscriptions must be registered before Exec — topics added afterwards
-// will not have a worker and PublishAsync for them will call OnError.
-func (a *App) Exec(ctx context.Context) error {
-	a.doneMu.Lock()
-	if a.done == nil {
-		a.doneMu.Unlock()
-		return fmt.Errorf("rockbus: Init must be called before Exec")
-	}
-	if a.running {
-		a.doneMu.Unlock()
-		return fmt.Errorf("rockbus: Exec is already running")
-	}
-	a.running = true
-	done := a.done
-	a.doneMu.Unlock()
-
-	defer func() {
-		a.doneMu.Lock()
-		a.running = false
-		a.doneMu.Unlock()
-	}()
-
 	queueSize := a.cfg.QueueSize
 	if queueSize <= 0 {
 		queueSize = 1024
 	}
 
-	// Snapshot topics and create per-topic queues.
-	a.mu.Lock()
+	// Lock order: stateMu, then mu. Holding stateMu while snapshotting the
+	// topics means a concurrent Subscribe either lands before the snapshot
+	// (and gets a queue) or sees inited and is rejected.
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	if a.running {
+		return fmt.Errorf("rockbus: Init called while Exec is running")
+	}
+
+	a.mu.RLock()
 	queues := make(map[Topic]chan asyncJob, len(a.handlers))
 	for topic := range a.handlers {
 		queues[topic] = make(chan asyncJob, queueSize)
 	}
-	a.queues = queues
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
-	// Start one worker goroutine per topic.
+	if a.inited && !a.stopped {
+		// Re-Init without Stop: release the previous generation first.
+		a.closeLocked()
+	}
+	a.queues = queues
+	a.stopCh = make(chan struct{})
+	a.inited = true
+	a.stopped = false
+	return nil
+}
+
+// Exec starts one worker goroutine per topic and blocks until ctx is
+// cancelled or Stop is called. Each worker drains its queue before exiting.
+//
+// All subscriptions must be registered before Init — topics added afterwards
+// have no queue and PublishAsync for them calls OnError with ErrNoWorker.
+func (a *App) Exec(ctx context.Context) error {
+	a.stateMu.Lock()
+	if !a.inited {
+		a.stateMu.Unlock()
+		return fmt.Errorf("rockbus: Init must be called before Exec")
+	}
+	if a.running {
+		a.stateMu.Unlock()
+		return fmt.Errorf("rockbus: Exec is already running")
+	}
+	a.running = true
+	queues, stopCh := a.queues, a.stopCh
+	a.stateMu.Unlock()
+
 	var wg sync.WaitGroup
 	for _, ch := range queues {
 		wg.Add(1)
 		go func(ch chan asyncJob) {
 			defer wg.Done()
-			for {
-				select {
-				case job := <-ch:
-					a.processJob(job)
-				case <-done:
-					// drain remaining jobs in this topic's queue before exiting
-					for {
-						select {
-						case job := <-ch:
-							a.processJob(job)
-						default:
-							return
-						}
-					}
-				}
+			// range exits once Stop has closed the channel and it is drained.
+			for job := range ch {
+				a.processJob(job)
 			}
 		}(ch)
 	}
@@ -149,40 +153,76 @@ func (a *App) Exec(ctx context.Context) error {
 	select {
 	case <-ctx.Done():
 		a.Stop()
-	case <-done:
+	case <-stopCh:
 	}
 
 	wg.Wait()
 
-	// Clear queues so PublishAsync after shutdown gets ErrAppStopped, not ErrNoWorker.
-	a.mu.Lock()
-	a.queues = nil
-	a.mu.Unlock()
-
+	a.stateMu.Lock()
+	a.running = false
+	a.stateMu.Unlock()
 	return nil
 }
 
-// Stop signals all workers to drain and exit.
-// Safe to call multiple times and before Init.
+// Stop stops accepting events, then lets the workers drain their queues.
+// Safe to call multiple times, before Init and before Exec. If Exec is not
+// running, queued events are reported to OnError with ErrAppStopped.
 func (a *App) Stop() []error {
-	a.doneMu.Lock()
-	done := a.done
-	a.doneMu.Unlock()
-
-	if done == nil {
+	a.stateMu.Lock()
+	if !a.inited || a.stopped {
+		a.stateMu.Unlock()
 		return nil
 	}
-	a.stopOnce.Do(func() { close(done) })
+	queues, running := a.queues, a.running
+	a.closeLocked()
+	a.stateMu.Unlock()
+
+	if !running {
+		// No workers will consume these queues; report what was buffered.
+		// Runs outside the lock so OnError may publish without deadlocking.
+		// If Exec starts concurrently, its workers and this loop share the
+		// drain — every job is still handled exactly once.
+		for _, ch := range queues {
+			for job := range ch {
+				a.callOnError(job.ctx, job.event, ErrAppStopped)
+			}
+		}
+	}
 	return nil
+}
+
+// closeLocked marks the current generation stopped and closes its queues.
+// Caller must hold stateMu for writing.
+func (a *App) closeLocked() {
+	a.stopped = true
+	close(a.stopCh)
+	for _, ch := range a.queues {
+		close(ch)
+	}
 }
 
 // Subscribe registers a raw handler for topic.
-// Must be called before Exec so the topic gets a dedicated worker.
-// Prefer On + NewApp for the primary registration flow.
-func (a *App) Subscribe(topic Topic, handler Handler) {
+// A new topic must be subscribed before Init so it gets a queue and a worker;
+// afterwards Subscribe returns an error wrapping ErrNoWorker (until the next
+// Init after Stop). Adding handlers to an already subscribed topic works at
+// any time.
+func (a *App) Subscribe(topic Topic, handler Handler) error {
+	if handler == nil {
+		return fmt.Errorf("rockbus: nil handler for topic %q", topic)
+	}
+
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	if a.inited && !a.stopped {
+		if _, ok := a.queues[topic]; !ok {
+			return fmt.Errorf("%w: %q is a new topic and the bus is already initialised", ErrNoWorker, topic)
+		}
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.handlers[topic] = append(a.handlers[topic], handler)
+	return nil
 }
 
 // Publish delivers event synchronously in the caller's goroutine.
@@ -205,46 +245,40 @@ func (a *App) Publish(ctx context.Context, event Event) error {
 }
 
 // PublishAsync routes event into the topic's dedicated queue.
-// Returns immediately. If the queue is full, the app is stopped, or the topic
-// has no worker, OnError is called with the dropped event.
+// Returns immediately. If the queue is full, the app is stopped or not yet
+// initialised, or the topic has no worker, OnError is called with the event.
 // Context cancellation and deadline are detached — the worker runs to completion
 // regardless of the caller's lifecycle.
 func (a *App) PublishAsync(ctx context.Context, event Event) {
-	a.doneMu.Lock()
-	done := a.done
-	a.doneMu.Unlock()
-
-	if done == nil {
-		a.callOnError(ctx, event, fmt.Errorf("rockbus: Init must be called before PublishAsync"))
-		return
+	err := a.enqueue(ctx, event)
+	if err != nil {
+		a.callOnError(ctx, event, err)
 	}
+}
 
-	// Fast path: already stopped.
-	select {
-	case <-done:
-		a.callOnError(ctx, event, ErrAppStopped)
-		return
-	default:
+// enqueue holds stateMu for reading for the whole send, so Stop cannot close
+// the channel in between. The send is non-blocking, so the read lock is held
+// only briefly.
+func (a *App) enqueue(ctx context.Context, event Event) error {
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+
+	if !a.inited {
+		return fmt.Errorf("rockbus: Init must be called before PublishAsync")
 	}
-
-	a.mu.RLock()
+	if a.stopped {
+		return ErrAppStopped
+	}
 	ch, ok := a.queues[event.Topic]
-	a.mu.RUnlock()
-
 	if !ok {
-		a.callOnError(ctx, event, fmt.Errorf("%w: %q", ErrNoWorker, event.Topic))
-		return
+		return fmt.Errorf("%w: %q", ErrNoWorker, event.Topic)
 	}
 
-	detached := context.WithoutCancel(ctx)
-	job := asyncJob{ctx: detached, event: event}
-
 	select {
-	case ch <- job:
-	case <-done:
-		a.callOnError(ctx, event, ErrAppStopped)
+	case ch <- asyncJob{ctx: context.WithoutCancel(ctx), event: event}:
+		return nil
 	default:
-		a.callOnError(ctx, event, ErrQueueFull)
+		return ErrQueueFull
 	}
 }
 

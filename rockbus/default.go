@@ -29,10 +29,10 @@ func Default() *App {
 	return defaultApp
 }
 
-// Subscribe registers a raw Handler on the default App.
-// Prefer the generic Subscribe[T] helper for type-safe subscriptions.
-func Subscribe(topic Topic, handler Handler) {
-	Default().Subscribe(topic, handler)
+// Subscribe registers a Handler on the default App. See App.Subscribe.
+// Prefer passing subscriptions to NewApp via On.
+func Subscribe(topic Topic, handler Handler) error {
+	return Default().Subscribe(topic, handler)
 }
 
 // Publish delivers event synchronously via the default App.

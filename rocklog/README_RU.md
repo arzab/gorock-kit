@@ -1,10 +1,10 @@
 # rocklog
 
-Структурированное логирование для Go с чистым интерфейсом, бэкендом на logrus и поддержкой глобального и инстанс-логгера.
+Структурированное логирование для Go с чистым интерфейсом, бэкендом на `log/slog` и поддержкой глобального и инстанс-логгера.
 
 ## Обзор
 
-`rocklog` скрывает любой логгер-бэкенд за интерфейсом `Logger`. По умолчанию используется [logrus](https://github.com/sirupsen/logrus). Все логи структурированы — поля типизированы, строки формата не нужны. Уровень лога всегда присутствует в выводе автоматически.
+`rocklog` скрывает любой логгер-бэкенд за интерфейсом `Logger`. По умолчанию используется [`log/slog`](https://pkg.go.dev/log/slog) из стандартной библиотеки — без сторонних зависимостей. Все логи структурированы — поля типизированы, строки формата не нужны. Уровень лога всегда присутствует в выводе автоматически.
 
 ## Быстрый старт
 
@@ -96,7 +96,7 @@ rocklog.SetDefault(myZapAdapter)
 
 | Хелпер                         | Описание                              |
 |--------------------------------|---------------------------------------|
-| `F(key, val)`                  | Любое значение                        |
+| `F(key, val)` / `Any(key, val)` | Любое значение                        |
 | `Err(err)`                     | Ошибка с ключом `"error"`             |
 | `Str(key, val)`                | Строка                                |
 | `Int(key, val)`                | int                                   |
@@ -139,7 +139,7 @@ log := rocklog.New(cfg).With(
     rocklog.Str("env", "prod"),
 )
 log.Info("charge created", rocklog.Int("amount", 100))
-// → level=info service=payments env=prod amount=100 msg="charge created"
+// → level=info msg="charge created" service=payments env=prod amount=100
 ```
 
 Вызовы `With` можно цепочить:
@@ -155,10 +155,27 @@ reqLog.Error("handler failed", rocklog.Err(err))
 ```go
 db := rocklog.Named("database")
 db.Info("query executed", rocklog.Dur("took", d))
-// → level=info logger=database took=2ms msg="query executed"
+// → level=info msg="query executed" logger=database took=2ms
 ```
 
 > Повторный вызов `Named` на уже именованном логгере перезаписывает предыдущее имя.
+
+### Context — логгер в контексте запроса
+
+Передавайте логгер с полями запроса через `context.Context`, а не явным параметром:
+
+```go
+// в middleware
+ctx = rocklog.WithContext(ctx, rocklog.Str("trace_id", traceId))
+
+// где угодно ниже
+rocklog.FromContext(ctx).Info("user created", rocklog.Str("id", id))
+// → level=info msg="user created" trace_id=... id=...
+```
+
+- `WithContext` добавляет поля к логгеру, уже лежащему в `ctx` (или к логгеру по умолчанию).
+- `ContextWithLogger(ctx, l)` кладёт конкретный логгер.
+- `FromContext` никогда не возвращает nil — если логгера нет, возвращается логгер по умолчанию.
 
 ## Проверка уровня
 
@@ -201,14 +218,16 @@ rocklog.SetDefault(&myZapLogger{})
 ```go
 rocklog.Init(rocklog.Config{Caller: true})
 rocklog.Info("hello")
-// → caller=main.go:42 level=info msg=hello
+// → level=info msg=hello caller=main.go:42
 ```
 
 Логгеры, созданные через `New`, и логгеры возвращённые `With` / `Named` всегда показывают правильное место вызова.
 
 ## Поведение Fatal
 
-`Fatal` логирует сообщение и вызывает `os.Exit(1)`. Defer-функции **не выполняются**. Используйте только для действительно неустранимых ошибок при старте приложения.
+`Fatal` логирует сообщение и вызывает `os.Exit(1)`. Defer-функции **не выполняются**. Используйте только для действительно неустранимых ошибок при старте приложения, до запуска движка.
+
+> **С rockengine:** не вызывайте `Fatal` внутри app — это пропускает graceful shutdown всех остальных apps (открытые запросы обрываются, события в очереди теряются). Верните ошибку из `Exec` — движок обработает её через политику рестартов / `StopOnFatal`.
 
 ## Ограничения
 
@@ -216,3 +235,4 @@ rocklog.Info("hello")
 - **`Stringer` с nil-pointer в интерфейсе** может вызвать панику если метод `String()` не обрабатывает nil-ресивер. Не передавайте nil-указатели, обёрнутые в ненулевой интерфейс.
 - **`SetDefault` с кастомным Logger и `Caller: true`** будет показывать `rocklog/default.go` как место вызова. Используйте `Init` или реализуйте caller-skip внутри своего адаптера.
 - **Конкурентный `Init` / `SetDefault`** во время активного логирования безопасен (`sync.RWMutex`), но лучше вызывать один раз при старте.
+- **Формат вывода** — названия уровней (`debug`, `info`, `warning`, `error`, `fatal`) и перезапись полей с тем же ключом такие же, как у прежнего бэкенда на logrus. Отличия: в текстовом формате `msg` идёт перед полями, поля не сортируются; время по умолчанию — RFC 3339 с миллисекундами (формат slog).

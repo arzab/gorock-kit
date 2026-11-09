@@ -89,8 +89,8 @@ func ParseRequest(ctx *fiber.Ctx, params interface{}) error {
 }
 
 var (
-	fileHeaderType  = reflect.TypeOf((*multipart.FileHeader)(nil))    // *multipart.FileHeader
-	fileHeaderSlice = reflect.TypeOf([]*multipart.FileHeader(nil))    // []*multipart.FileHeader
+	fileHeaderType  = reflect.TypeOf((*multipart.FileHeader)(nil)) // *multipart.FileHeader
+	fileHeaderSlice = reflect.TypeOf([]*multipart.FileHeader(nil)) // []*multipart.FileHeader
 )
 
 // parseMultipartFiles reads file fields from a multipart form into the struct.

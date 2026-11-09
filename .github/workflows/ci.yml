@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  module:
+    name: ${{ matrix.module }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module:
+          - rockbun
+          - rockbus
+          - rockconfig
+          - rockcron
+          - rockengine
+          - rockfiber
+          - rocklog
+          - rockredis
+          - rocktelebot
+          - examples/fullapp
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: "**/go.sum"
+      - name: tidy
+        run: bash scripts/check.sh tidy-check ${{ matrix.module }}
+      - name: build
+        run: bash scripts/check.sh build ${{ matrix.module }}
+      - name: vet
+        run: bash scripts/check.sh vet ${{ matrix.module }}
+      - name: test
+        run: bash scripts/check.sh test ${{ matrix.module }}
+      - name: lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+          working-directory: ${{ matrix.module }}
