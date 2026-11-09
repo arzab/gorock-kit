@@ -4,18 +4,21 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
+## v0.3.0 — 2026-11-10
+
 ### Added
 
-- **rockdelivery** — the delivery contract: `Handler[In, Out]` (`func(ctx, *In) (*Out, error)`), `Bind` → `Action` (`NewInput`, `Call` with validation and panic recovery), error kinds `Invalid`/`Unauthorized`/`Forbidden`/`NotFound`/`Conflict`/`Unavailable`/Internal with `KindOf`/`MessageOf`, `Validator`, transport-independent `Middleware`, `Timeout`; `Pipeline` + `Codec` (Decode / Encode / EncodeError) that runs every request the same way for any transport, with `Failure` (Internal messages hidden), `OnFailure`, `Observe` and panic containment; `Route` with typed metadata (`NewMetaKey`, `WithMeta`, `Meta`). No transport.
+- **rockhandlers** — transport-independent request handling: `Ctx[P, R]` (a `context.Context` with typed `Params`/`Result`, `Next`, `Route`), `Chain` → `Route` (generics erased; `Serve(ctx, fill)` with decoding inside the chain, `With`, `ParamsType`/`ResultType` for transports), `Prepend` for group functions, `Middleware` over `Context`, `Validator`, typed `Local[T]` (`Get`/`MustGet`), `Timeout`, `Run[R]` for tests; error kinds incl. `Canceled`/`Timeout` and `KindNone` for nil, `Fields`, `PanicError`.
 - **rockservices** — the services layer: `Catalog` with `Add(c, ctor, cfg)`, `Get[T](name)`, `Init`, `Stop` (reverse order, timeout), a default catalog, `New()` and `SetDefault` for tests. A service implements `Name() string`, `Init(ctx) error`, `Stop() error`.
 
 ### Removed
 
+- **rockhttp** was never released in the kit: the HTTP transport for rockhandlers lives in gorock-catalog.
 - **rockengine:** `Resource`, `RegisterResource`, `MustRegisterResource`. The engine runs apps only; services are started before it and stopped after it by `rockservices` in `cmd/main`.
 
 ### ⚠️ Changes that need action
 
-The kit is now only its core: **`rockengine`** and **`rockconfig`**. The other modules were moved, as-is, to the sibling repository `gorock-catalog` (a separate repository, not published yet) (module paths `github.com/arzab/gorock-catalog/<module>`), where they will be reshaped into a catalog of components you copy into your project, with an HTTP app on `net/http` instead of Fiber.
+The kit is now only its core: **`rockengine`**, **`rockconfig`**, **`rockservices`** and **`rockhandlers`**. The other modules were moved, as-is, to [gorock-catalog](https://github.com/arzab/gorock-catalog) (module paths `github.com/arzab/gorock-catalog/<module>`), which also hosts `rockhttp`, the `net/http` transport for rockhandlers.
 
 | Removed module | Where |
 |---|---|

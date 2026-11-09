@@ -15,8 +15,8 @@ jobs:
         module:
           - rockconfig
           - rockengine
-          - rockdelivery
           - rockservices
+          - rockhandlers
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
