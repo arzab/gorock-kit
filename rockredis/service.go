@@ -115,9 +115,23 @@ func (s *service) Set(ctx context.Context, key string, value any, ttl time.Durat
 	return s.client.Set(ctx, key, value, ttl).Err()
 }
 
+// SetNX uses SET ... NX (go-redis deprecated the SETNX helper). Same
+// semantics: ttl 0 = no expiry, redis.KeepTTL = keep the existing TTL.
 func (s *service) SetNX(ctx context.Context, key string, value any, ttl time.Duration) (bool, error) {
-	ok, err := s.client.SetNX(ctx, key, value, ttl).Result()
-	return ok, wrapErr(err)
+	args := redis.SetArgs{Mode: "NX"}
+	if ttl == redis.KeepTTL {
+		args.KeepTTL = true
+	} else {
+		args.TTL = ttl
+	}
+	err := s.client.SetArgs(ctx, key, value, args).Err()
+	if errors.Is(err, redis.Nil) {
+		return false, nil // key already exists
+	}
+	if err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *service) Del(ctx context.Context, keys ...string) error {

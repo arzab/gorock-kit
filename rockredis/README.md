@@ -11,11 +11,14 @@ svc := rockredis.NewService(rockredis.Configs{
     DB:       0,
 })
 
-ctx := context.Background()
-if err := svc.Ping(ctx); err != nil {
+// With rockengine: initialised before apps, closed after them.
+rockengine.RegisterResource("redis", svc)
+
+// Standalone:
+if err := svc.Init(ctx); err != nil { // creates the client and pings
     log.Fatal(err)
 }
-defer svc.Close()
+defer svc.Stop()
 ```
 
 ## Loading Config from File
@@ -198,4 +201,4 @@ Uses the system certificate pool. For custom certificates, set `TLSEnabled: fals
 - `Init` closes the client again if `Ping` fails; calling `Init` again replaces and closes the previous client. After `Stop`, calls return `redis: client is closed`.
 - `Subscribe.Channel()` is a buffered goroutine bridge — slow consumers can delay message delivery.
 - `TLSEnabled: true` uses the system cert pool; mutual TLS requires a custom `redis.Options` setup.
-- `ZRank` uses ascending order. For descending rank use `redis.Client.ZRevRank` directly via `NewClient` and casting.
+- `ZRank` uses ascending order. For descending rank, and any other command the `Service` interface does not cover, use the underlying client: `rockredis.Client(svc).ZRevRank(ctx, key, member)`. `Client` returns `nil` before `Init`.
