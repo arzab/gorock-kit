@@ -6,6 +6,29 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 _Nothing yet._
 
+## v0.2.0 — 2026-11-09
+
+Security release: dependency updates for published advisories.
+
+### ⚠️ Changes that need action
+
+| Module | Change | What to do |
+|---|---|---|
+| all | **Minimum Go is 1.26** (was 1.25). Fixed versions of `golang.org/x/net` (≥ v0.62) and `golang.org/x/crypto` (≥ v0.56) require it, and Go 1.25 no longer receives security fixes. | Build with Go 1.26 or 1.27, preferably the latest patch release — several advisories are in the standard library (`crypto/tls`, `crypto/x509`, `net/http`) and are fixed only by the Go toolchain. |
+
+### Security
+
+- **rockfiber:** `github.com/andybalholm/brotli` v1.1.0 → v1.2.x (GO-2026-6888, excessive memory allocation on crafted streams). This one is reachable: it affects servers with `Compress: true`.
+- **rockfiber:** `gofiber/fiber/v2` → v2.52.16, `valyala/fasthttp`, `klauspost/compress`, `golang.org/x/net`, `golang.org/x/text`, `golang.org/x/sys` to fixed versions.
+- **rockbun:** `golang.org/x/crypto`, `go.opentelemetry.io/otel`, `uptrace/bun` to fixed versions.
+- Other modules: dependencies updated to their latest releases.
+
+`govulncheck` reports no vulnerabilities in any module with Go 1.26.10. Apart from brotli, the advisories were in dependency code that the kit does not call (e.g. the SSH packages of `x/crypto`), but they triggered alerts for every user.
+
+### Fixed
+
+- **rockconfig, rockfiber:** deprecated `reflect.Ptr` replaced by `reflect.Pointer`.
+
 ## v0.1.0 — 2026-11-09
 
 First tagged release. Everything before it was untagged (pseudo-versions).
