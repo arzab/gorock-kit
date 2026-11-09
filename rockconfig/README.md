@@ -73,63 +73,58 @@ type Config struct {
 
 ## Validation
 
-After loading, all fields without `omitempty`, `default=`, or `-` are checked for emptiness:
+A field is **required** unless it has `omitempty`, `default=` or `-`. A required field must be **present** in the file (or provided by its `env=` binding). Its value may be anything, including zero:
 
-| Type              | Considered empty       |
-|-------------------|------------------------|
-| `string`          | `""`                   |
-| `int` / `uint`    | `0`                    |
-| `float`           | `0.0`                  |
-| `slice` / `map`   | `nil` or length 0      |
-| `array`           | length 0               |
-| pointer           | `nil`                  |
-| `bool`            | **never** (see below)  |
-
-If any required fields are missing, `InitFromFile` returns an error listing all of them:
-
-```
-rockconfig: missing required fields:
-  Config.Host
-  Config.Database.Password
+```yaml
+port: 0          # ok — 0 is a value
+enabled: false   # ok — required bools work
+tags: []         # ok
+host: ""         # error — a required string must not be empty
+# missing key    → error
+# key with null  → treated as missing
 ```
 
-### Bool fields
+All problems are reported together. Paths use config keys as written in the file:
 
-`bool` has no meaningful "empty" state — Go's zero value `false` is indistinguishable from "not set". Therefore:
+```
+rockconfig: config.yaml: missing required fields:
+  http.port
+  database.password (empty)
+unknown keys (typo? use rockconfig.AllowUnknownKeys() to ignore):
+  http.request_timout
+```
 
-- A plain `bool` field is **never** reported as missing, even if absent from the config file.
-- If you need to enforce that a bool was **explicitly set**, use `*bool`:
+Check the kind of error with `errors.Is(err, rockconfig.ErrMissingFields)` / `errors.Is(err, rockconfig.ErrUnknownKeys)`.
+
+### Unknown keys
+
+Keys that do not map to any field (including keys of fields tagged `-`) are an error, so typos do not silently fall back to defaults. If one file is shared by several programs, pass `AllowUnknownKeys()`:
 
 ```go
-type Config struct {
-    Enabled *bool // nil = not set → validation error; &false = explicit false → ok
-}
+cfg, err := rockconfig.InitFromFile[Config]("config.yaml", rockconfig.AllowUnknownKeys())
 ```
 
 ### Pointer fields
 
-Pointer types solve the "zero value vs not set" ambiguity for any type:
-
-```go
-type Config struct {
-    Port    *int  // nil = not set; &0 = explicitly set to 0
-    Enabled *bool // nil = not set; &false = explicitly set to false
-}
-```
-
-A `nil` pointer is always considered empty (required field missing). A non-nil pointer is never empty, regardless of the pointed-to value.
+Use a pointer when the program needs to know whether a value was given at all — an optional `*int` stays `nil` when absent and is `&0` when set to 0.
 
 ## Environment Variables
 
-### Inline expansion
+### Inline references
 
-`$ENV_VAR` and `${ENV_VAR}` references anywhere in the config file are expanded automatically before parsing:
+String values may reference environment variables. References are expanded **after** the file is parsed, so an env value can never change the file structure.
 
 ```yaml
 database:
-  password: ${DB_PASSWORD}
-  host: $DB_HOST
+  password: ${DB_PASSWORD}            # error if DB_PASSWORD is unset
+  host: ${DB_HOST:-localhost}         # fallback when unset or empty
+  port: ${DB_PORT:-5432}              # strings convert to the field type
+  dsn: "postgres://${DB_HOST}/app"    # can be embedded
+  hash: "$2a$10$..."                  # a bare $ is literal
+  template: "$${NOT_EXPANDED}"        # $${ is a literal ${
 ```
+
+> **Changed:** previously the raw file went through `os.ExpandEnv`: `$VAR` (without braces) was expanded, unset variables silently became `""`, and values like `pa$$word` were corrupted. Write `${VAR}` now.
 
 ### Explicit field binding
 
@@ -152,7 +147,7 @@ If `APP_SECRET` is not set in the environment, the value from the config file is
 | `int`, `int8..64`    | ✅        |                                            |
 | `uint`, `uint8..64`  | ✅        |                                            |
 | `float32`, `float64` | ✅        |                                            |
-| `time.Duration`      | ✅        | `"5s"`, `"1m30s"` or nanoseconds as int   |
+| `time.Duration`      | ✅        | `"5s"`, `"1m30s"`; bare numbers are rejected |
 | `[]T` (slice)        | ✅        | Elements follow same conversion rules      |
 | `map[K]V`            | ✅        | String keys recommended                    |
 | pointer to any above | ✅        |                                            |
@@ -189,6 +184,8 @@ server:
 
 If `database` is present in the file, its fields are validated normally even with `omitempty`.
 
+Defaults and `env=` bindings inside a section apply even when the section is absent from the file. An optional pointer section (`*DatabaseConfig` with `omitempty`) stays `nil` unless the file or an env binding provides a value for it.
+
 ## Adding Custom Formats
 
 Implement `Decoder` and register it for a file extension:
@@ -207,7 +204,6 @@ rockconfig.RegisterDecoder(".toml", &MyTomlDecoder{})
 ## Limitations
 
 - **Embedded (anonymous) structs** are treated as named nested fields, not flattened. Use explicit field names instead.
-- **`bool` zero value** cannot be distinguished from "not set". Use `*bool` to enforce presence.
-- **`int` zero value** (e.g. port 0) is treated as missing. Use `*int` if 0 is a valid value.
 - **`default=` must be last** in the tag option list.
-- **`os.ExpandEnv`** is applied to the raw file before parsing. Env var values containing YAML/JSON special characters (quotes, braces, newlines) may corrupt the file structure.
+- **Durations** must be strings with a unit (`"30s"`). A bare number is rejected — it would otherwise mean nanoseconds.
+- **`time.Time`** and other struct types from other packages are treated as nested objects, which is rarely what you want. Load them as strings and parse in code.

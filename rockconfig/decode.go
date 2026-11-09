@@ -33,8 +33,9 @@ func RegisterDecoder(ext string, dec Decoder) {
 	decoders[ext] = dec
 }
 
-// load reads the file at path, expands $ENV_VAR references, and decodes it
-// into a generic map using the decoder matched by file extension.
+// load reads the file at path and decodes it into a generic map using the
+// decoder matched by file extension. Env references are expanded later, on
+// decoded string values only (see expandEnvTree).
 func load(path string) (map[string]interface{}, error) {
 	ext := filepath.Ext(path)
 
@@ -51,13 +52,13 @@ func load(path string) (map[string]interface{}, error) {
 		return nil, fmt.Errorf("read config file: %w", err)
 	}
 
-	expanded := os.ExpandEnv(string(raw))
-
-	m, err := dec.Decode([]byte(expanded))
+	m, err := dec.Decode(raw)
 	if err != nil {
 		return nil, fmt.Errorf("decode config (%s): %w", ext, err)
 	}
-
+	if m == nil {
+		m = map[string]interface{}{} // empty file
+	}
 	return m, nil
 }
 
