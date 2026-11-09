@@ -4,7 +4,15 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
-_Nothing yet._
+### ⚠️ Changes that need action
+
+The kit is now only its core: **`rockengine`** and **`rockconfig`**. The other modules were moved, as-is, to the sibling repository [gorock-catalog](https://github.com/arzab/gorock-catalog) (module paths `github.com/arzab/gorock-catalog/<module>`), where they will be reshaped into a catalog of components you copy into your project, with an HTTP app on `net/http` instead of Fiber.
+
+| Removed module | Where |
+|---|---|
+| `rockfiber`, `rockbus`, `rockcron`, `rocktelebot`, `rockbun`, `rockredis`, `rocklog` | gorock-catalog; their last kit versions, `v0.2.0`, stay available here |
+
+`examples/fullapp` was removed with them.
 
 ## v0.2.0 — 2026-11-09
 

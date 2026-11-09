@@ -1,4 +1,4 @@
-# Thin wrapper over scripts/check.sh. Pass MODULES="rockengine rockbus" to limit scope.
+# Thin wrapper over scripts/check.sh. Pass MODULES="rockengine" to limit scope.
 MODULES ?=
 
 .PHONY: all build vet test tidy-check lint

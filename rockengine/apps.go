@@ -30,7 +30,7 @@ type App interface {
 // stopped after every App has stopped, in reverse order. So an HTTP server
 // finishes its in-flight requests before the database pool it uses is closed.
 //
-// rockbun.Service and rockredis.Service satisfy this interface.
+// A GOROCK service in pkg/services (Init(ctx) error / Stop() error) satisfies it.
 type Resource interface {
 	Init(ctx context.Context) error
 	Stop() error

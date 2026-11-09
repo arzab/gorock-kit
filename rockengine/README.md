@@ -136,11 +136,11 @@ type Resource interface {
 ```
 
 ```go
-db := rockbun.NewService(cfg.DB)
-cache := rockredis.NewService(cfg.Redis)
+repo := repository.NewService(cfg.Repository)   // your pkg/services/repository
+cache := cache.NewService(cfg.Cache)
 
-rockengine.RegisterResource("db", db)
-rockengine.RegisterResource("redis", cache)
+rockengine.RegisterResource("repository", repo)
+rockengine.RegisterResource("cache", cache)
 rockengine.Register("http", server)
 ```
 
@@ -148,7 +148,7 @@ rockengine.Register("http", server)
 - Resources are stopped **after** every app has stopped, in reverse order — the HTTP server finishes in-flight requests before the pool they use is closed.
 - Resource `Stop` is covered by the shutdown timeout; errors are returned from `Run`.
 - Resources are not restarted and have no state in `AppStatuses`.
-- `rockbun.Service` and `rockredis.Service` satisfy `Resource`.
+- Any GOROCK service (`Init(ctx) error` / `Stop() error`) is a `Resource`; ready-made PostgreSQL and Redis services live in [gorock-catalog](https://github.com/arzab/gorock-catalog).
 
 ## Orchestration
 

@@ -1,14 +1,6 @@
 go 1.26.0
 
 use (
-	./examples/fullapp
-	./rockbun
-	./rockbus
 	./rockconfig
-	./rockcron
 	./rockengine
-	./rockfiber
-	./rocklog
-	./rockredis
-	./rocktelebot
 )
