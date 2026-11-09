@@ -52,7 +52,12 @@ fi
 run() {
   local step="$1" m="$2"
   case "$step" in
-    build) (cd "$m" && go build ./...) ;;
+    build)
+      # -o <dir> keeps main packages (examples/*) from dropping a binary in the module.
+      local out; out="$(mktemp -d)"
+      (cd "$m" && go build -o "$out/" ./...); local rc=$?
+      rm -rf "$out"; return $rc
+      ;;
     vet)   (cd "$m" && go vet ./...) ;;
     test) (cd "$m" && go test $race_flag -count=1 ./...) ;;
     tidy-check)
