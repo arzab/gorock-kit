@@ -60,6 +60,10 @@ type Config struct {
 	Compress bool `config:",omitempty"` // gzip/deflate/brotli compression
 	Helmet   bool `config:",omitempty"` // security headers: X-Frame-Options, CSP, HSTS, etc.
 
+	// Pprof exposes Go profiling endpoints at <AdminEndpointsPath>/debug/pprof/,
+	// behind the admin password. Disabled by default: profiles reveal memory contents.
+	Pprof bool `config:",omitempty"`
+
 	// Endpoint middlewares (routes under EndpointsPathPrefix only).
 	UseTraceId     bool          `config:",omitempty"`
 	RequestTimeout time.Duration `config:",omitempty"` // context deadline; 0 = disabled
@@ -68,10 +72,10 @@ type Config struct {
 	RateLimit        *limiter.Config `config:"-"` // nil = disabled
 	Swagger          *SwaggerConfig  `config:"-"` // nil = disabled
 	MonitoringConfig *monitor.Config `config:"-"` // nil = default
-	CorsConfig       *cors.Config    `config:"-"` // nil = allow all origins
+	CorsConfig       *cors.Config    `config:"-"` // nil = CORS disabled (browsers block cross-origin requests)
 
 	// MaskInternalServerErrorMessage replaces raw 500 messages in responses.
-	// The real message is still visible via ?debug= query param.
+	// The real message is still passed to OnError for logging.
 	MaskInternalServerErrorMessage string `config:",omitempty"`
 
 	// Must be set in code — function types.
@@ -129,8 +133,9 @@ func (a *FiberApp) Init(_ context.Context) error {
 
 	// Global middlewares — applied to every route including admin and /status.
 	a.fiber.Use(RecoverHandler())
-	a.fiber.Use(PprofHandler(adminPath))
-	a.fiber.Use(CorsHandler(a.cfg.CorsConfig))
+	if a.cfg.CorsConfig != nil {
+		a.fiber.Use(CorsHandler(a.cfg.CorsConfig))
+	}
 
 	if a.cfg.Compress {
 		a.fiber.Use(compress.New())
@@ -216,6 +221,11 @@ func (a *FiberApp) setupEndpoints() {
 
 	admin := a.fiber.Group(a.cfg.AdminEndpointsPath)
 	admin.Use(AdminAuthMiddleware(a.cfg.AdminPassword))
+	if a.cfg.Pprof {
+		// Registered after the auth middleware: pprof answers requests itself
+		// without calling Next, so anything before auth would be public.
+		admin.Use(PprofHandler(a.cfg.AdminEndpointsPath))
+	}
 	admin.Get("/metrics", MetricsHandler(a.cfg.MonitoringConfig))
 
 	a.fiber.Get("/status", func(c *fiber.Ctx) error {

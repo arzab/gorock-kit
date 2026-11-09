@@ -37,12 +37,14 @@ func RecoverHandler() fiber.Handler {
 	})
 }
 
-// PprofHandler registers pprof routes under the given path prefix.
+// PprofHandler serves pprof routes under prefix + "/debug/pprof".
+// It answers requests itself, so mount it after any auth middleware.
 func PprofHandler(prefix string) fiber.Handler {
 	return pprof.New(pprof.Config{Prefix: prefix})
 }
 
-// CorsHandler returns a CORS middleware. Passing nil uses the fiber default policy.
+// CorsHandler returns a CORS middleware. Passing nil uses the fiber default policy
+// (all origins). FiberApp only installs it when Config.CorsConfig is set.
 func CorsHandler(cfg *cors.Config) fiber.Handler {
 	if cfg != nil {
 		return cors.New(*cfg)
@@ -120,8 +122,9 @@ func RequestTimeoutMiddleware(d time.Duration) fiber.Handler {
 
 // ErrorHandler returns a fiber error handler that serialises errors as ErrorResponse JSON.
 //
-// maskMessage, when non-empty, replaces raw internal server error messages.
-// The original message is still shown when the ?debug= query param is present.
+// maskMessage, when non-empty, replaces raw internal server error messages in
+// responses. The original message is still passed to onError. Clients cannot
+// bypass the mask.
 //
 // onError is an optional callback invoked for every error response — use it to integrate
 // rocklog or any other logger without coupling rockfiber to a specific library.
@@ -140,15 +143,19 @@ func ErrorHandler(
 			errResp = NewError(fiberErr.Code, fiberErr.Message)
 		default:
 			msg := err.Error()
-			if maskMessage != "" && c.Query("debug") == "" {
-				msg = maskMessage
-			}
 			errResp = NewError(http.StatusInternalServerError, msg).WithSource("internal")
 		}
 
 		if onError != nil {
 			traceId, _ := c.Locals(TraceIdKey).(string)
 			onError(traceId, errResp)
+		}
+
+		// Mask after onError so logs keep the real message.
+		if maskMessage != "" && errResp.Code == http.StatusInternalServerError && errResp.Source == "internal" {
+			masked := *errResp
+			masked.Message = maskMessage
+			errResp = &masked
 		}
 
 		return c.Status(errResp.Code).JSON(errResp)
