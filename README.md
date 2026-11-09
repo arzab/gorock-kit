@@ -18,25 +18,23 @@ A collection of Go modules for building production-ready applications. Each modu
 
 ## Architecture
 
-All modules follow a consistent pattern:
-
-- **rockengine** is the backbone — any component that needs a managed lifecycle implements `App` (`Init / Exec / Stop`) and registers with the engine.
-- **rockconfig** loads typed config structs from a file; each module exposes its own `Config`/`Configs` struct compatible with rockconfig's field mapping.
-- **rocklog** provides structured logging used across all modules.
+- **The modules do not import each other** — install only what you need. Lifecycle components (`rockfiber`, `rockbus`, `rockcron`, `rocktelebot`) implement `rockengine.App` (`Init / Exec / Stop`) by signature, and the database / cache wrappers (`rockbun`, `rockredis`) implement `rockengine.Resource` (`Init / Stop`).
+- **rockengine** runs them: resources start first, apps start in registration order, and on shutdown apps stop one by one in reverse order before the resources are closed.
+- **rockconfig** loads one typed config file; every module exposes a `Config`/`Configs` struct that fits into it.
+- **rocklog** is a structured logger. Modules that report errors take callbacks (`OnError`, `onError`), so you can plug in rocklog or any other logger.
 
 ```
-rockengine
-    ├── rockfiber   (HTTP server)
-    ├── rockbus     (event bus)
-    ├── rockcron    (scheduler)
-    ├── rocktelebot (telegram bot)
-    └── your apps
+rockengine ── resources: rockbun, rockredis     (init first, stop last)
+           └─ apps:      rockbus, rockcron,
+                         rockfiber, rocktelebot (stop in reverse order)
 
-rockconfig  ──►  all module Configs
-rocklog     ──►  all modules
+rockconfig ──► one file → every module's Config
+rocklog    ◄── wired in through OnError callbacks and rocklog.WithContext
 ```
 
 ## Example: full application
+
+The complete, runnable version is [`examples/fullapp`](./examples/fullapp) — it is built in CI, so this snippet cannot drift from the API.
 
 ```go
 func main() {
@@ -47,33 +45,38 @@ func main() {
 
     rocklog.Init(rocklog.Config{Level: rocklog.LevelInfo, Format: rocklog.FormatJSON})
 
-    engine := rockengine.New()
+    engine := rockengine.NewEngine()
 
-    // HTTP server
-    server := rockfiber.New(cfg.HTTP,
-        rockfiber.GET("/health", healthHandler),
-        rockfiber.POST("/users", createUserHandler),
-    )
-    engine.MustRegister("http", server, rockengine.RestartPolicy{})
+    // Resources: initialised before every app, closed after every app.
+    db := rockbun.NewService(cfg.DB)
+    engine.MustRegisterResource("db", db)
+    engine.MustRegisterResource("redis", rockredis.NewService(cfg.Redis))
 
     // Event bus
     bus := rockbus.NewApp(cfg.Bus,
         func(ctx context.Context, event rockbus.Event, err error) { /* handle */ },
         rockbus.On("user.created", onUserCreated),
-        rockbus.On("order.placed", onOrderPlaced),
     )
     rockbus.SetDefault(bus)
-    engine.MustRegister("bus", bus, rockengine.RestartPolicy{})
+    engine.MustRegister("bus", bus)
 
     // Scheduler
     cron := rockcron.NewApp(cfg.Cron,
         func(ctx context.Context, job rockcron.Job, err error) { /* handle */ },
-        rockcron.Every("sync-cache",  5*time.Minute, syncCache),
-        rockcron.Cron("daily-report", "0 3 * * *",  dailyReport),
+        rockcron.Every("ping-db", time.Minute, func(ctx context.Context) error { return db.Ping(ctx) }),
     )
-    engine.MustRegister("cron", cron, rockengine.RestartPolicy{})
+    engine.MustRegister("cron", cron)
 
-    engine.Run()
+    // HTTP server — registered last, so it is stopped first.
+    server := rockfiber.New(cfg.HTTP,
+        rockfiber.GET("/health", healthHandler),
+        rockfiber.POST("/users", createUserHandler),
+    )
+    engine.MustRegister("http", server, rockengine.RestartPolicy{MaxRetries: 3, Delay: time.Second})
+
+    if err := engine.Run(); err != nil { // blocks until SIGINT/SIGTERM or an app fails
+        log.Fatal(err)
+    }
 }
 ```
 
@@ -95,9 +98,12 @@ go get github.com/arzab/gorock-kit/rocktelebot
 
 ## Local development
 
-A `go.work` file at the repo root wires all modules together:
+`go.work` at the repo root wires all modules (and `examples/fullapp`) together. There is no root module, so `go build ./...` from the root matches nothing — use the check script, which loops over modules:
 
 ```sh
-go work sync
-go build ./...
+bash scripts/check.sh all                # build + vet + test, every module
+bash scripts/check.sh test rockengine    # one module
+bash scripts/check.sh tidy-check         # go.mod / go.sum must be tidy
 ```
+
+Tests run with `-race` when the toolchain supports it (needs cgo and a C compiler). See [CHANGELOG.md](./CHANGELOG.md) for behaviour changes.

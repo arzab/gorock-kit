@@ -16,7 +16,7 @@ if [ "$#" -gt 0 ]; then
   modules=("$@")
 else
   modules=()
-  for d in rock*/; do
+  for d in rock*/ examples/*/; do
     [ -f "$d/go.mod" ] && modules+=("${d%/}")
   done
 fi
