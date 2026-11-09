@@ -35,7 +35,14 @@
   - `ErrMissingFields` / `ErrUnknownKeys` для `errors.Is`; опция `AllowUnknownKeys()`.
   - Найден баг в `rockbus.Config.QueueSize`: без тега поле было обязательным, хотя документировано как «по умолчанию 1024». Добавлен `omitempty`.
   - Реальные конфиги всех модулей проверены загрузкой через новый `rockconfig` (временный модуль в workspace).
-- [ ] Фазы 5–6.
+- [x] **Фаза 5** — выполнена по решениям владельца:
+  1. `Stop(ctx)` — **не делаем**, контракт `Stop() []error` остаётся.
+  2. `rockengine.Resource` (`Init(ctx) error` / `Stop() error`) + `RegisterResource`: init до всех apps, stop после всех apps в обратном порядке, под таймаутом остановки. `rockbun.Service` / `rockredis.Service` подходят без изменений (проверяется `compat_test.go`).
+  3. `rocklog` на `log/slog`, logrus удалён из зависимостей. Сохранены названия уровней (`warning`, не `WARN`) и замена полей с тем же ключом в `With`/`Named` (slog сам по себе дублирует ключи).
+  4. `rockbus.Subscribe` возвращает `error` (новый топик после `Init`, nil-хендлер). Порядок блокировок: `stateMu` → `mu`.
+  5. `rockredis.Client(svc)` — функция пакета, а не метод интерфейса, чтобы не ломать пользовательские реализации `Service` (моки).
+  - Попутно: Quick Start в README `rockbun`/`rockredis` был нерабочим (`Ping` без `Init`, несуществующий `Close`) — исправлен. В CI `cache-dependency-path` указывал на несуществующие `go.sum` модулей без зависимостей — заменён на `**/go.sum`. Линтер в CI (фаза 0) не работал бы вовсе: `golangci-lint-action@v6` не поддерживает golangci-lint v2, а v2.1.6 собран на Go 1.24 и отказывается от модулей на Go 1.25 — заменено на `@v8` + v2.5.0, прогнан в Docker на всех модулях (0 замечаний после исправления трёх находок, в т.ч. устаревшего `SetNX` в `rockredis`).
+- [ ] Фаза 6.
 
 ## Фаза 0. Подготовка (без изменения поведения)
 
