@@ -6,6 +6,7 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ### Added
 
+- **rockdelivery** — the delivery contract: `Handler[In, Out]` (`func(ctx, *In) (*Out, error)`), `Bind` → `Action` (`NewInput`, `Call` with validation and panic recovery), error kinds `Invalid`/`Unauthorized`/`Forbidden`/`NotFound`/`Conflict`/`Unavailable`/Internal with `KindOf`/`MessageOf`, `Validator`, transport-independent `Middleware`, `Timeout`; `Pipeline` + `Codec` (Decode / Encode / EncodeError) that runs every request the same way for any transport, with `Failure` (Internal messages hidden), `OnFailure`, `Observe` and panic containment; `Route` with typed metadata (`NewMetaKey`, `WithMeta`, `Meta`). No transport.
 - **rockservices** — the services layer: `Catalog` with `Add(c, ctor, cfg)`, `Get[T](name)`, `Init`, `Stop` (reverse order, timeout), a default catalog, `New()` and `SetDefault` for tests. A service implements `Name() string`, `Init(ctx) error`, `Stop() error`.
 
 ### Removed

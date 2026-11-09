@@ -7,8 +7,9 @@
 | [rockengine](./rockengine) | Жизненный цикл apps: старт в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
 | [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по имени, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
+| [rockdelivery](./rockdelivery) | Контракт delivery: бизнес-логика как типизированные функции `func(ctx, *In) (*Out, error)`, виды ошибок без привязки к транспорту, валидация, middleware — их может обслуживать любой App |
 
-Go 1.26+. `rockengine` и `rockservices` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
+Go 1.26+. `rockengine`, `rockservices` и `rockdelivery` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
 
 HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина событий, планировщик и Telegram-бот вынесены из kit в `gorock-catalog` (отдельный репозиторий, пока не опубликован). Их последние версии здесь, `v0.2.0`, остаются доступны.
 
@@ -83,6 +84,7 @@ func Register(c *rockservices.Catalog, cfg Configs) {
 go get github.com/arzab/gorock-kit/rockengine
 go get github.com/arzab/gorock-kit/rockconfig
 go get github.com/arzab/gorock-kit/rockservices
+go get github.com/arzab/gorock-kit/rockdelivery
 ```
 
 ## ИИ-агенты
