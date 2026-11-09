@@ -60,7 +60,7 @@ func ParseRequest(ctx *fiber.Ctx, params interface{}) error {
 	if params == nil {
 		return fmt.Errorf("params must not be nil")
 	}
-	if reflect.TypeOf(params).Kind() != reflect.Ptr {
+	if reflect.TypeOf(params).Kind() != reflect.Pointer {
 		return fmt.Errorf("params must be a pointer")
 	}
 
@@ -105,7 +105,7 @@ func parseMultipartFiles(ctx *fiber.Ctx, out interface{}) error {
 	}
 
 	val := reflect.ValueOf(out)
-	if val.Kind() != reflect.Ptr || val.IsNil() {
+	if val.Kind() != reflect.Pointer || val.IsNil() {
 		return fmt.Errorf("out must be a non-nil pointer")
 	}
 	val = val.Elem()

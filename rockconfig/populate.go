@@ -139,14 +139,14 @@ func structTarget(fv reflect.Value) (elem reflect.Type, isPtr bool, ok bool) {
 	if t.Kind() == reflect.Struct {
 		return t, false, true
 	}
-	if t.Kind() == reflect.Ptr && t.Elem().Kind() == reflect.Struct {
+	if t.Kind() == reflect.Pointer && t.Elem().Kind() == reflect.Struct {
 		return t.Elem(), true, true
 	}
 	return nil, false, false
 }
 
 func isEmptyString(v reflect.Value) bool {
-	if v.Kind() == reflect.Ptr {
+	if v.Kind() == reflect.Pointer {
 		if v.IsNil() {
 			return false
 		}
@@ -158,7 +158,7 @@ func isEmptyString(v reflect.Value) bool {
 // setValue sets field to val, handling pointers, nested structs (e.g. inside
 // slices and maps), slices and maps.
 func (l *loader) setValue(field reflect.Value, val interface{}, path string) error {
-	if field.Kind() == reflect.Ptr {
+	if field.Kind() == reflect.Pointer {
 		if val == nil {
 			return nil
 		}
@@ -237,7 +237,7 @@ func (l *loader) setMap(field reflect.Value, val interface{}, path string) error
 
 // setFromString sets field from a string value (used for defaults and env vars).
 func setFromString(field reflect.Value, s string) error {
-	if field.Kind() == reflect.Ptr {
+	if field.Kind() == reflect.Pointer {
 		elem := reflect.New(field.Type().Elem())
 		if err := setFromString(elem.Elem(), s); err != nil {
 			return err

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Repository layout
 
-`gorock-kit` is a **multi-module** Go repo (Go 1.25): each top-level `rock*` directory is its own module (`github.com/arzab/gorock-kit/<name>`) with its own `go.mod`/`go.sum`. There is no root `go.mod`; the committed `go.work` wires the modules together.
+`gorock-kit` is a **multi-module** Go repo (Go 1.26 minimum; keep every module's `go` directive in sync): each top-level `rock*` directory is its own module (`github.com/arzab/gorock-kit/<name>`) with its own `go.mod`/`go.sum`. There is no root `go.mod`; the committed `go.work` wires the modules together.
 
 ## Commands
 
@@ -17,6 +17,8 @@ bash scripts/check.sh tidy-check                 # fails if any go.mod/go.sum is
 cd rocktelebot && go test -run TestRestart -v .  # single test
 cd rockfiber && go mod tidy                      # deps are managed per module
 ```
+
+Dependency updates: `go get -u` silently raises a module's `go` directive when a new dependency needs a newer Go — check the `go` lines in the diff; that is a breaking change for users. golangci-lint refuses modules whose `go` version is newer than the Go it was built with, so bump the lint version in `ci.yml` together with the Go version. Check reachability with `govulncheck ./...` per module (on the latest Go patch, e.g. in `golang:1.26` Docker), not only Dependabot.
 
 `check.sh test` uses `-race` only if a race build actually works (needs cgo + a C compiler; locally it does not, CI on Linux does). Force with `RACE=1`/`RACE=0`. CI: `.github/workflows/ci.yml` (matrix per module, golangci-lint with root `.golangci.yml`).
 
