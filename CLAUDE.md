@@ -22,7 +22,7 @@ cd rockfiber && go mod tidy                      # deps are managed per module
 
 Test seams: unexported package vars such as `errWriter` (`stderr.go`) and `rocktelebot.newBot` (swap in an offline bot with a fake poller) are overridden in tests; `rockfiber` tests call `Init` + `setupEndpoints` and use `fiber.App.Test` without listening. Each lifecycle module has `compat_test.go` asserting it still matches the `rockengine.App` signature — keep it when changing `Init/Exec/Stop`.
 
-Fix roadmap and status: `FIX_PLAN.md`.
+Releasing: all modules share one version; tag each module on the merged `main` commit, never on a feature branch (`for m in rock*; do git tag -a "$m/vX.Y.Z" -m "$m vX.Y.Z"; done; git push origin --tags`), and move the `Unreleased` section of `CHANGELOG.md` under that version.
 
 ## Architecture
 

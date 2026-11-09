@@ -2,7 +2,11 @@
 
 All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `rockfiber/v0.1.0`, …), as Go requires for a multi-module repository.
 
-## Unreleased — planned v0.1.0
+## Unreleased
+
+_Nothing yet._
+
+## v0.1.0 — 2026-11-09
 
 First tagged release. Everything before it was untagged (pseudo-versions).
 
