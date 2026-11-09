@@ -8,11 +8,10 @@
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
 | [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по имени, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
 | [rockhandlers](./rockhandlers) | Обработка запросов без привязки к транспорту: цепочка типизированных шагов с `Next`, Locals, middleware, валидацией, перехватом паник и видами ошибок — любой транспорт (HTTP, очередь, CLI) запускает одни и те же маршруты |
-| [rockhttp](./rockhttp) | **Экспериментальный** HTTP-транспорт для rockhandlers на `net/http`; может переехать в gorock-catalog |
 
-Go 1.26+. `rockengine`, `rockservices`, `rockhandlers` и `rockhttp` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
+Go 1.26+. `rockengine`, `rockservices` и `rockhandlers` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
 
-HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина событий, планировщик и Telegram-бот вынесены из kit в `gorock-catalog` (отдельный репозиторий, пока не опубликован). Их последние версии здесь, `v0.2.0`, остаются доступны.
+HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина событий, планировщик и Telegram-бот находятся в [gorock-catalog](https://github.com/arzab/gorock-catalog), там же `rockhttp` — HTTP-транспорт для rockhandlers. Их последние версии внутри kit, `v0.2.0`, остаются доступны.
 
 ## Как они связаны
 

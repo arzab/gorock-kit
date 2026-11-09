@@ -17,7 +17,6 @@ jobs:
           - rockengine
           - rockservices
           - rockhandlers
-          - rockhttp
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
