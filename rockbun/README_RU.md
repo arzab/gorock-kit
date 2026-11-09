@@ -67,7 +67,7 @@ type Configs struct {
     User     string
     Password string
     Database string
-    SSLMode  string // по умолчанию "disable"
+    SSLMode  string // по умолчанию "disable"; в проде используйте "verify-full"
 
     MaxOpenConns    int           // по умолчанию 25
     MaxIdleConns    int           // по умолчанию 5
@@ -178,5 +178,8 @@ if err := migrator.Migrate(ctx); err != nil {
 
 ## Ограничения
 
+- `Init` закрывает пул, если `Ping` не прошёл (`DB()` остаётся `nil`); повторный `Init` заменяет и закрывает предыдущий пул. После `Stop` запросы возвращают `sql: database is closed`.
+- User, password и database из отдельных полей экранируются, поэтому пароли с `@`, `:`, `/` или `#` работают. DSN, заданный вручную, экранируйте сами.
+- `SSLMode` по умолчанию `disable`. В pgdriver `prefer` / `require` шифруют, но **не** проверяют сертификат сервера (а `prefer` не откатывается на plaintext). Для реальной защиты используйте `verify-full`.
 - Только PostgreSQL (через `pgdriver`). Для MySQL или SQLite используй `bun.NewDB` напрямую с нужным драйвером.
 - `QueryHooks` применяются при создании через `NewService`; после этого добавить или удалить хуки нельзя.

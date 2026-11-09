@@ -3,7 +3,10 @@ package rockbun
 import (
 	"context"
 	"database/sql"
-	"fmt"
+	"errors"
+	"net"
+	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/uptrace/bun"
@@ -12,8 +15,9 @@ import (
 )
 
 type service struct {
-	cfg Configs
-	db  *bun.DB
+	cfg    Configs
+	db     *bun.DB
+	closed bool // Stop closed db; it is kept so calls fail with "sql: database is closed" instead of panicking
 }
 
 // NewService creates a Service that is ready to be initialised.
@@ -23,6 +27,8 @@ func NewService(cfg Configs) Service {
 }
 
 // Init opens the connection pool and verifies connectivity via Ping.
+// If Ping fails, the new pool is closed and DB() stays nil.
+// Calling Init again closes the previous pool first.
 func (s *service) Init(ctx context.Context) error {
 	dsn := s.cfg.DSN
 	if dsn == "" {
@@ -39,16 +45,25 @@ func (s *service) Init(ctx context.Context) error {
 	for _, hook := range s.cfg.QueryHooks {
 		db = db.WithQueryHook(hook)
 	}
-	s.db = db
 
-	return s.Ping(ctx)
+	if err := db.PingContext(ctx); err != nil {
+		return errors.Join(err, db.Close())
+	}
+
+	if prev := s.db; prev != nil && !s.closed {
+		_ = prev.Close()
+	}
+	s.db = db
+	s.closed = false
+	return nil
 }
 
-// Stop closes the connection pool.
+// Stop closes the connection pool. Safe to call multiple times.
 func (s *service) Stop() error {
-	if s.db == nil {
+	if s.db == nil || s.closed {
 		return nil
 	}
+	s.closed = true
 	return s.db.Close()
 }
 
@@ -64,14 +79,23 @@ func (s *service) RunInTx(ctx context.Context, opts *sql.TxOptions, fn func(ctx 
 	return s.db.RunInTx(ctx, opts, fn)
 }
 
+// buildDSN assembles a postgres URL from individual fields. User, password
+// and database are escaped, so values containing '@', ':', '/' or '#' are safe.
 func buildDSN(cfg Configs) string {
 	host := strOrDefault(cfg.Host, "localhost")
 	port := intOrDefault(cfg.Port, 5432)
 	sslMode := strOrDefault(cfg.SSLMode, "disable")
-	return fmt.Sprintf(
-		"postgres://%s:%s@%s:%d/%s?sslmode=%s",
-		cfg.User, cfg.Password, host, port, cfg.Database, sslMode,
-	)
+
+	u := url.URL{
+		Scheme:   "postgres",
+		Host:     net.JoinHostPort(host, strconv.Itoa(port)),
+		Path:     "/" + cfg.Database,
+		RawQuery: url.Values{"sslmode": {sslMode}}.Encode(),
+	}
+	if cfg.User != "" || cfg.Password != "" {
+		u.User = url.UserPassword(cfg.User, cfg.Password)
+	}
+	return u.String()
 }
 
 func intOrDefault(v, def int) int {

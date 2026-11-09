@@ -13,6 +13,7 @@ import (
 type service struct {
 	cfg    Configs
 	client *redis.Client
+	closed bool // Stop closed client; it is kept so calls fail with "redis: client is closed" instead of panicking
 }
 
 // NewService creates a Service that is ready to be initialised.
@@ -22,6 +23,8 @@ func NewService(configs Configs) Service {
 }
 
 // Init creates the Redis client and verifies connectivity via Ping.
+// If Ping fails, the new client is closed and the service stays uninitialised.
+// Calling Init again closes the previous client first.
 func (s *service) Init(ctx context.Context) error {
 	addr := s.cfg.Addr
 	if addr == "" {
@@ -42,15 +45,25 @@ func (s *service) Init(ctx context.Context) error {
 		opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
 
-	s.client = redis.NewClient(opts)
-	return s.Ping(ctx)
+	client := redis.NewClient(opts)
+	if err := client.Ping(ctx).Err(); err != nil {
+		return errors.Join(err, client.Close())
+	}
+
+	if prev := s.client; prev != nil && !s.closed {
+		_ = prev.Close()
+	}
+	s.client = client
+	s.closed = false
+	return nil
 }
 
-// Stop releases the connection pool.
+// Stop releases the connection pool. Safe to call multiple times.
 func (s *service) Stop() error {
-	if s.client == nil {
+	if s.client == nil || s.closed {
 		return nil
 	}
+	s.closed = true
 	return s.client.Close()
 }
 

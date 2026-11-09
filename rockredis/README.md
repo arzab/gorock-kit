@@ -195,6 +195,7 @@ Uses the system certificate pool. For custom certificates, set `TLSEnabled: fals
 
 ## Limitations
 
+- `Init` closes the client again if `Ping` fails; calling `Init` again replaces and closes the previous client. After `Stop`, calls return `redis: client is closed`.
 - `Subscribe.Channel()` is a buffered goroutine bridge — slow consumers can delay message delivery.
 - `TLSEnabled: true` uses the system cert pool; mutual TLS requires a custom `redis.Options` setup.
 - `ZRank` uses ascending order. For descending rank use `redis.Client.ZRevRank` directly via `NewClient` and casting.
