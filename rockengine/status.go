@@ -26,9 +26,19 @@ type AppInfo struct {
 //   - MaxRetries = 0: no restart (default)
 //   - MaxRetries = -1: unlimited restarts
 //   - MaxRetries > 0: restart up to N times, then mark as failed
+//
+// A panic in Exec counts as a failure and follows the same policy.
 type RestartPolicy struct {
 	MaxRetries    int
-	Delay         time.Duration  // wait between restart attempts
-	RestartOnExit bool           // restart even if Exec returns nil (unexpected clean exit)
-	OnFatal       func(err error) // called when the app is marked as failed; overrides Engine.WithFatalHandler for this app
+	Delay         time.Duration // wait between restart attempts
+	RestartOnExit bool          // restart even if Exec returns nil (unexpected clean exit); not counted as a retry
+
+	// ResetAfter resets the retry counter when a run lasted at least this long
+	// before failing, so MaxRetries limits crash loops rather than lifetime
+	// failures. 0 = never reset.
+	ResetAfter time.Duration
+
+	// OnFatal is called when the app is marked as failed; overrides
+	// Engine.WithFatalHandler for this app.
+	OnFatal func(err error)
 }

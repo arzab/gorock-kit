@@ -4,14 +4,16 @@ import "context"
 
 // App defines the lifecycle of an application managed by Engine.
 //
-// Call order: Init → Exec → Stop
+// Call order: Init → Exec → Stop. On restart: Stop → Init → Exec.
 //
 // Shutdown contract:
 //   - Exec must stop accepting new work when ctx is cancelled and return
-//     after finishing any in-flight operations.
-//   - Stop is called concurrently with ctx cancellation. For blocking Exec
-//     (e.g. HTTP server), Stop must unblock it gracefully — waiting for
-//     in-flight work before returning.
+//     after finishing any in-flight operations. Whatever it returns after
+//     cancellation is treated as a clean stop.
+//   - Stop is called right after ctx cancellation, possibly while Exec is
+//     still running. For blocking Exec (e.g. HTTP server), Stop must unblock
+//     it gracefully — waiting for in-flight work before returning.
+//   - The engine calls Stop at most once per successful Init.
 //   - Stop must not forcefully terminate ongoing work; the Engine enforces
 //     a shutdown timeout as a last resort.
 type App interface {

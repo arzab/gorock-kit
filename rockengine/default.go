@@ -18,6 +18,12 @@ func SetFatalHandler(fn func(name string, err error)) {
 	defaultEngine.WithFatalHandler(fn)
 }
 
+// SetStopOnFatal sets whether the default engine shuts down when an app fails.
+// See Engine.WithStopOnFatal.
+func SetStopOnFatal(stop bool) {
+	defaultEngine.WithStopOnFatal(stop)
+}
+
 // Register adds a named app to the default engine.
 // Panics if the name is already registered or the engine is running.
 func Register(name string, app App, policy ...RestartPolicy) {
