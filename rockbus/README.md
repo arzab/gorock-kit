@@ -89,7 +89,7 @@ app := rockbus.NewApp(cfg, Subscriptions...)
 ### Via Subscribe (before Init)
 
 ```go
-app.Subscribe("user.created", func(ctx context.Context) error {
+err := app.Subscribe("user.created", func(ctx context.Context) error {
     p, err := rockbus.Payload[UserCreated](ctx)
     if err != nil {
         return err
@@ -98,8 +98,10 @@ app.Subscribe("user.created", func(ctx context.Context) error {
 })
 
 // Or via the package-level function
-rockbus.Subscribe("user.created", onUserCreated)
+err = rockbus.Subscribe("user.created", onUserCreated)
 ```
+
+`Subscribe` returns an error wrapping `ErrNoWorker` for a **new** topic after `Init` (it would have no queue), and for a nil handler.
 
 Multiple handlers can be registered for the same topic — all are called in registration order.
 

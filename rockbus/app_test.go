@@ -295,6 +295,38 @@ func TestOnErrorMayPublish(t *testing.T) {
 	}
 }
 
+func TestSubscribeAfterInit(t *testing.T) {
+	a := NewApp(Config{}, nil, On("known", func(context.Context) error { return nil }))
+	if err := a.Subscribe("before", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("Subscribe before Init: %v", err)
+	}
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.Subscribe("known", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("extra handler for existing topic: %v", err)
+	}
+	if err := a.Subscribe("brand-new", func(context.Context) error { return nil }); !errors.Is(err, ErrNoWorker) {
+		t.Fatalf("new topic after Init: err = %v", err)
+	}
+	if err := a.Subscribe("known", nil); err == nil {
+		t.Fatal("nil handler accepted")
+	}
+
+	// After Stop, a new topic is accepted again and gets a queue on the next Init.
+	a.Stop()
+	if err := a.Subscribe("brand-new", func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("Subscribe after Stop: %v", err)
+	}
+	if err := a.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.enqueue(context.Background(), Event{Topic: "brand-new"}); err != nil {
+		t.Fatalf("topic subscribed between Stop and Init has no queue: %v", err)
+	}
+	a.Stop()
+}
+
 func TestPublishSyncJoinsErrors(t *testing.T) {
 	e1, e2 := errors.New("one"), errors.New("two")
 	a := NewApp(Config{}, nil,

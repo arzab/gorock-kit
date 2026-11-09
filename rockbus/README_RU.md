@@ -89,7 +89,7 @@ app := rockbus.NewApp(cfg, Subscriptions...)
 ### Через Subscribe (до Init)
 
 ```go
-app.Subscribe("user.created", func(ctx context.Context) error {
+err := app.Subscribe("user.created", func(ctx context.Context) error {
     p, err := rockbus.Payload[UserCreated](ctx)
     if err != nil {
         return err
@@ -98,8 +98,10 @@ app.Subscribe("user.created", func(ctx context.Context) error {
 })
 
 // Или через глобальную функцию
-rockbus.Subscribe("user.created", onUserCreated)
+err = rockbus.Subscribe("user.created", onUserCreated)
 ```
+
+`Subscribe` возвращает ошибку с `ErrNoWorker` для **нового** топика после `Init` (у него не было бы очереди) и для nil-хендлера.
 
 На один топик можно зарегистрировать несколько хендлеров — все вызываются в порядке регистрации.
 

@@ -18,7 +18,7 @@ var ErrQueueFull = errors.New("rockbus: async queue is full, event dropped")
 var ErrAppStopped = errors.New("rockbus: app is stopped, event dropped")
 
 // ErrNoWorker is passed to OnError when PublishAsync is called for a topic
-// that had no handlers registered before Init was called.
+// that has no handlers, and returned by Subscribe for a new topic after Init.
 // Fix: pass the Subscription to NewApp or call Subscribe before starting the engine.
 var ErrNoWorker = errors.New("rockbus: no worker for topic, Subscribe must be called before Init")
 
@@ -92,6 +92,15 @@ func (a *App) Init(_ context.Context) error {
 		queueSize = 1024
 	}
 
+	// Lock order: stateMu, then mu. Holding stateMu while snapshotting the
+	// topics means a concurrent Subscribe either lands before the snapshot
+	// (and gets a queue) or sees inited and is rejected.
+	a.stateMu.Lock()
+	defer a.stateMu.Unlock()
+	if a.running {
+		return fmt.Errorf("rockbus: Init called while Exec is running")
+	}
+
 	a.mu.RLock()
 	queues := make(map[Topic]chan asyncJob, len(a.handlers))
 	for topic := range a.handlers {
@@ -99,11 +108,6 @@ func (a *App) Init(_ context.Context) error {
 	}
 	a.mu.RUnlock()
 
-	a.stateMu.Lock()
-	defer a.stateMu.Unlock()
-	if a.running {
-		return fmt.Errorf("rockbus: Init called while Exec is running")
-	}
 	if a.inited && !a.stopped {
 		// Re-Init without Stop: release the previous generation first.
 		a.closeLocked()
@@ -198,13 +202,27 @@ func (a *App) closeLocked() {
 }
 
 // Subscribe registers a raw handler for topic.
-// A new topic must be subscribed before Init so it gets a queue and a worker.
-// Adding handlers to an already subscribed topic works at any time.
-// Prefer On + NewApp for the primary registration flow.
-func (a *App) Subscribe(topic Topic, handler Handler) {
+// A new topic must be subscribed before Init so it gets a queue and a worker;
+// afterwards Subscribe returns an error wrapping ErrNoWorker (until the next
+// Init after Stop). Adding handlers to an already subscribed topic works at
+// any time.
+func (a *App) Subscribe(topic Topic, handler Handler) error {
+	if handler == nil {
+		return fmt.Errorf("rockbus: nil handler for topic %q", topic)
+	}
+
+	a.stateMu.RLock()
+	defer a.stateMu.RUnlock()
+	if a.inited && !a.stopped {
+		if _, ok := a.queues[topic]; !ok {
+			return fmt.Errorf("%w: %q is a new topic and the bus is already initialised", ErrNoWorker, topic)
+		}
+	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.handlers[topic] = append(a.handlers[topic], handler)
+	return nil
 }
 
 // Publish delivers event synchronously in the caller's goroutine.
