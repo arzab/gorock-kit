@@ -32,7 +32,7 @@ func RecoverHandler() fiber.Handler {
 	return recover.New(recover.Config{
 		EnableStackTrace: true,
 		StackTraceHandler: func(c *fiber.Ctx, e interface{}) {
-			_, _ = os.Stderr.WriteString(fmt.Sprintf("panic: %v\n%s\n", e, debug.Stack()))
+			_, _ = fmt.Fprintf(os.Stderr, "panic: %v\n%s\n", e, debug.Stack())
 		},
 	})
 }

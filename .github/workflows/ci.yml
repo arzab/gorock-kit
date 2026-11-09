@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: ${{ matrix.module }}/go.mod
-          cache-dependency-path: ${{ matrix.module }}/go.sum
+          cache-dependency-path: "**/go.sum"
       - name: tidy
         run: bash scripts/check.sh tidy-check ${{ matrix.module }}
       - name: build
@@ -37,7 +37,7 @@ jobs:
       - name: test
         run: bash scripts/check.sh test ${{ matrix.module }}
       - name: lint
-        uses: golangci/golangci-lint-action@v6
+        uses: golangci/golangci-lint-action@v8
         with:
-          version: v2.1.6
+          version: v2.5.0
           working-directory: ${{ matrix.module }}
