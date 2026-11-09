@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tele "gopkg.in/telebot.v3"
@@ -26,8 +27,16 @@ type App struct {
 	cfg         Config
 	middlewares []tele.MiddlewareFunc
 	handlers    []Handler
-	bot         *tele.Bot
+
+	mu      sync.Mutex
+	bot     *tele.Bot
+	stopped bool          // Stop was requested for the current Init generation
+	done    chan struct{} // closed when the current bot.Start returns; nil when not running
+	stopBot func()        // stops the current run exactly once; nil when not running
 }
+
+// newBot is overridable in tests to create an offline bot with a fake poller.
+var newBot = tele.NewBot
 
 // NewApp creates an App with the given global middlewares and handlers.
 // middlewares can be nil.
@@ -52,7 +61,7 @@ func (a *App) Init(_ context.Context) error {
 		poller = &tele.LongPoller{Timeout: 10 * time.Second}
 	}
 
-	bot, err := tele.NewBot(tele.Settings{
+	bot, err := newBot(tele.Settings{
 		Token:  a.cfg.Token,
 		Poller: poller,
 	})
@@ -82,30 +91,75 @@ func (a *App) Init(_ context.Context) error {
 		}
 	}
 
+	a.mu.Lock()
 	a.bot = bot
+	a.stopped = false
+	a.mu.Unlock()
 	return nil
 }
 
 // Exec starts the bot and blocks until ctx is cancelled or Stop is called.
+//
+// Cancellation and Stop may happen concurrently and any number of times:
+// the underlying bot is stopped exactly once per run. telebot's Bot.Stop blocks
+// forever when the bot is not running, so it must never be called twice.
 func (a *App) Exec(ctx context.Context) error {
-	if a.bot == nil {
+	a.mu.Lock()
+	bot := a.bot
+	if bot == nil {
+		a.mu.Unlock()
 		return fmt.Errorf("rocktelebot: Init must be called before Exec")
 	}
+	if a.done != nil {
+		a.mu.Unlock()
+		return fmt.Errorf("rocktelebot: Exec is already running")
+	}
+	if a.stopped {
+		// Stop arrived between Init and Exec — do not start.
+		a.mu.Unlock()
+		return nil
+	}
+	done := make(chan struct{})
+	a.done = done
+	a.stopBot = sync.OnceFunc(bot.Stop)
+	a.mu.Unlock()
 
 	go func() {
-		<-ctx.Done()
-		a.bot.Stop()
+		defer close(done)
+		bot.Start()
 	}()
 
-	a.bot.Start()
+	select {
+	case <-ctx.Done():
+		a.stop()
+	case <-done:
+	}
+	<-done
+
+	a.mu.Lock()
+	a.done = nil
+	a.stopBot = nil
+	a.mu.Unlock()
 	return nil
 }
 
-// Stop shuts down the bot. Safe to call before Init.
+// Stop shuts down the bot and waits for Exec to finish processing updates.
+// Safe to call before Init, before Exec, concurrently with ctx cancellation,
+// and multiple times.
 func (a *App) Stop() []error {
-	if a.bot == nil {
-		return nil
-	}
-	a.bot.Stop()
+	a.stop()
 	return nil
+}
+
+func (a *App) stop() {
+	a.mu.Lock()
+	a.stopped = true
+	stopBot, done := a.stopBot, a.done
+	a.mu.Unlock()
+
+	if stopBot == nil {
+		return // not running
+	}
+	stopBot() // concurrent callers block here until the first call completes
+	<-done
 }
