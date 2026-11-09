@@ -37,9 +37,9 @@ type Config struct {
 NewApp(cfg, onError, jobs...) → Init → Exec (blocks) → Stop
 ```
 
-- **Init** resets internal state. Safe to call again after `Stop` for restart scenarios.
-- **Exec** registers all jobs, starts the scheduler, and blocks until `ctx` is cancelled or `Stop` is called.
-- **Stop** is idempotent and safe to call before `Init`.
+- **Init** validates `Location` and every schedule and registers the jobs. Configuration errors are returned here, so they fail startup instead of triggering restarts. Safe to call again after `Stop` for restart scenarios.
+- **Exec** starts the scheduler and blocks until `ctx` is cancelled or `Stop` is called.
+- **Stop** is idempotent and safe to call before `Init`. It only signals; `Exec` returns once running jobs have finished.
 
 ## Defining Jobs
 
@@ -123,7 +123,7 @@ errors.Is(err, rockcron.ErrPanic) // job handler panicked, panic recovered
 
 - **SkipIfStillRunning** — if a job's previous run has not finished when the next tick arrives, the tick is silently skipped. No duplicate concurrent runs.
 - **Graceful shutdown** — when stopped, the scheduler waits for all currently running jobs to finish before `Exec` returns.
-- **Context** — the `ctx` passed to handlers is the same context as `Exec`. When the App is stopping, `ctx` is cancelled — long-running jobs should respect it.
+- **Context** — the `ctx` passed to handlers derives from the `Exec` context and is cancelled when the App stops, whether by `ctx` cancellation or `Stop`. Long-running jobs should respect it.
 - **Panic recovery** — panics in any handler are caught and converted to an `ErrPanic`-wrapped error, which is passed to `onError`. The goroutine is never brought down.
 
 ## Limitations
@@ -131,3 +131,4 @@ errors.Is(err, rockcron.ErrPanic) // job handler panicked, panic recovered
 - **No dynamic registration** — all jobs must be passed to `NewApp`. Adding jobs after `Exec` starts is not supported.
 - **No per-job concurrency** — each job has at most one running instance at a time (SkipIfStillRunning).
 - **Minute precision for Cron** — the standard 5-field expression has 1-minute granularity. Use `Every` for sub-minute intervals.
+- **Every is at least 1 second** — robfig/cron rounds shorter `@every` intervals up to 1s.
