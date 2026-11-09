@@ -39,11 +39,11 @@ func Example() {
 	route := rockhandlers.Chain("orders.get", Bearer, getOrder).
 		With(logErrors, rockhandlers.Timeout(time.Second))
 
-	res, err := rockhandlers.Run[*GetOrderParams, *GetOrderResult](context.Background(), route,
+	res, err := rockhandlers.Run[*GetOrderResult](context.Background(), route,
 		&GetOrderParams{BearerAuth: BearerAuth{Authorization: "Bearer ann"}, ID: "42"})
 	fmt.Println(res.ID, res.Owner, err)
 
-	_, err = rockhandlers.Run[*GetOrderParams, *GetOrderResult](context.Background(), route, &GetOrderParams{ID: "42"})
+	_, err = rockhandlers.Run[*GetOrderResult](context.Background(), route, &GetOrderParams{ID: "42"})
 	fmt.Println(rockhandlers.MessageOf(err))
 	// Output:
 	// 42 ann <nil>

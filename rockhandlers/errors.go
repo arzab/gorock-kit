@@ -24,9 +24,10 @@ const (
 	KindUnavailable       // temporarily unavailable; retrying may help
 	KindCanceled          // the context was cancelled: caller gone or shutting down
 	KindTimeout           // the context deadline passed
+	KindNone              // no error: KindOf(nil)
 )
 
-var kindNames = [...]string{"internal", "invalid", "unauthorized", "forbidden", "not_found", "conflict", "unavailable", "canceled", "timeout"}
+var kindNames = [...]string{"internal", "invalid", "unauthorized", "forbidden", "not_found", "conflict", "unavailable", "canceled", "timeout", "none"}
 
 func (k Kind) String() string {
 	if k >= 0 && int(k) < len(kindNames) {
@@ -90,12 +91,14 @@ func NotFound(msg string, args ...any) *Error     { return New(KindNotFound, msg
 func Conflict(msg string, args ...any) *Error     { return New(KindConflict, msg, args...) }
 func Unavailable(msg string, args ...any) *Error  { return New(KindUnavailable, msg, args...) }
 
-// KindOf classifies err: the kind of the first *Error in its chain;
-// otherwise context.Canceled → KindCanceled, context.DeadlineExceeded →
-// KindTimeout, anything else → KindInternal.
+// KindOf classifies err: KindNone for nil; the kind of the first *Error in
+// its chain; otherwise context.Canceled → KindCanceled,
+// context.DeadlineExceeded → KindTimeout, anything else → KindInternal.
 func KindOf(err error) Kind {
 	var e *Error
 	switch {
+	case err == nil:
+		return KindNone
 	case errors.As(err, &e):
 		return e.Kind
 	case errors.Is(err, context.Canceled):

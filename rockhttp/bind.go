@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/arzab/gorock-kit/rockdelivery"
+	"github.com/arzab/gorock-kit/rockhandlers"
 )
 
 const defaultMaxMemory = 32 << 20 // multipart parts kept in memory
@@ -33,15 +33,12 @@ var (
 //     []*multipart.FileHeader for uploaded files
 //   - JSON body       decoded into the whole struct when Content-Type is JSON
 //
+// Tags inside embedded structs are bound too (e.g. an embedded BearerAuth
+// with `header:"Authorization"`).
+//
 // Order: JSON body, then form, query, header, path (later wins).
 func bind(r *http.Request, in any, maxBody int64) error {
 	v := reflect.ValueOf(in)
-	if v.Kind() != reflect.Pointer || v.Elem().Kind() != reflect.Struct {
-		if r.ContentLength == 0 {
-			return nil
-		}
-		return decodeJSON(r, in, maxBody)
-	}
 
 	ct, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	switch {
@@ -52,23 +49,40 @@ func bind(r *http.Request, in any, maxBody int64) error {
 	case ct == "multipart/form-data":
 		r.Body = http.MaxBytesReader(nil, r.Body, maxBody)
 		if err := r.ParseMultipartForm(defaultMaxMemory); err != nil {
-			return rockdelivery.Invalid("invalid multipart form: %v", err)
+			return rockhandlers.Invalid("invalid multipart form: %v", err)
 		}
 	case ct == "application/x-www-form-urlencoded":
 		r.Body = http.MaxBytesReader(nil, r.Body, maxBody)
 		if err := r.ParseForm(); err != nil {
-			return rockdelivery.Invalid("invalid form: %v", err)
+			return rockhandlers.Invalid("invalid form: %v", err)
 		}
 	}
 
-	s := v.Elem()
+	return bindFields(r, v.Elem())
+}
+
+func bindFields(r *http.Request, s reflect.Value) error {
 	t := s.Type()
 	for i := 0; i < t.NumField(); i++ {
 		sf := t.Field(i)
+		f := s.Field(i)
+		if sf.Anonymous {
+			if f.Kind() == reflect.Pointer && f.Type().Elem().Kind() == reflect.Struct && sf.IsExported() {
+				if f.IsNil() {
+					f.Set(reflect.New(f.Type().Elem()))
+				}
+				f = f.Elem()
+			}
+			if f.Kind() == reflect.Struct && f.CanSet() {
+				if err := bindFields(r, f); err != nil {
+					return err
+				}
+				continue
+			}
+		}
 		if !sf.IsExported() {
 			continue
 		}
-		f := s.Field(i)
 		if name := sf.Tag.Get("form"); name != "" {
 			if err := bindForm(r, f, name); err != nil {
 				return err
@@ -77,21 +91,21 @@ func bind(r *http.Request, in any, maxBody int64) error {
 		if name := sf.Tag.Get("query"); name != "" {
 			if vals, ok := r.URL.Query()[name]; ok {
 				if err := setValues(f, vals); err != nil {
-					return rockdelivery.Invalid("query %q: %v", name, err)
+					return rockhandlers.Invalid("query %q: %v", name, err)
 				}
 			}
 		}
 		if name := sf.Tag.Get("header"); name != "" {
 			if vals := r.Header.Values(name); len(vals) > 0 {
 				if err := setValues(f, vals); err != nil {
-					return rockdelivery.Invalid("header %q: %v", name, err)
+					return rockhandlers.Invalid("header %q: %v", name, err)
 				}
 			}
 		}
 		if name := sf.Tag.Get("path"); name != "" {
 			if val := r.PathValue(name); val != "" {
 				if err := setValues(f, []string{val}); err != nil {
-					return rockdelivery.Invalid("path %q: %v", name, err)
+					return rockhandlers.Invalid("path %q: %v", name, err)
 				}
 			}
 		}
@@ -104,9 +118,9 @@ func decodeJSON(r *http.Request, in any, maxBody int64) error {
 	if err := dec.Decode(in); err != nil && !errors.Is(err, io.EOF) {
 		var tooBig *http.MaxBytesError
 		if errors.As(err, &tooBig) {
-			return rockdelivery.Invalid("request body is larger than %d bytes", tooBig.Limit)
+			return rockhandlers.Invalid("request body is larger than %d bytes", tooBig.Limit)
 		}
-		return rockdelivery.Invalid("invalid JSON body: %v", err)
+		return rockhandlers.Invalid("invalid JSON body: %v", err)
 	}
 	return nil
 }
@@ -133,7 +147,7 @@ func bindForm(r *http.Request, f reflect.Value, name string) error {
 	}
 	if vals, ok := r.Form[name]; ok {
 		if err := setValues(f, vals); err != nil {
-			return rockdelivery.Invalid("form %q: %v", name, err)
+			return rockhandlers.Invalid("form %q: %v", name, err)
 		}
 	}
 	return nil

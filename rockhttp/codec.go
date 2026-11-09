@@ -10,21 +10,69 @@ import (
 	"path/filepath"
 	"reflect"
 
-	"github.com/arzab/gorock-kit/rockdelivery"
+	"github.com/arzab/gorock-kit/rockhandlers"
 )
 
-// codec is the rockdelivery.Codec for net/http.
-type codec struct {
-	maxBody int64
+// StatusClientClosedRequest is used when the request context was cancelled
+// (the client went away): nothing is sent, but logs and proxies see 499.
+const StatusClientClosedRequest = 499
+
+// StatusOf maps an error kind to an HTTP status.
+func StatusOf(k rockhandlers.Kind) int {
+	switch k {
+	case rockhandlers.KindInvalid:
+		return http.StatusBadRequest
+	case rockhandlers.KindUnauthorized:
+		return http.StatusUnauthorized
+	case rockhandlers.KindForbidden:
+		return http.StatusForbidden
+	case rockhandlers.KindNotFound:
+		return http.StatusNotFound
+	case rockhandlers.KindConflict:
+		return http.StatusConflict
+	case rockhandlers.KindUnavailable:
+		return http.StatusServiceUnavailable
+	case rockhandlers.KindCanceled:
+		return StatusClientClosedRequest
+	case rockhandlers.KindTimeout:
+		return http.StatusGatewayTimeout
+	default:
+		return http.StatusInternalServerError
+	}
 }
 
-func (c codec) Decode(_ context.Context, _ rockdelivery.Route, r *http.Request, in any) error {
-	return bind(r, in, c.maxBody)
+// ErrorBody is the JSON body of every error response.
+type ErrorBody struct {
+	Code    int               `json:"code"`
+	Status  string            `json:"status"`
+	Kind    string            `json:"kind"`
+	Message string            `json:"message"`
+	Fields  map[string]string `json:"fields,omitempty"`
 }
 
-func (c codec) Encode(ctx context.Context, rt rockdelivery.Route, w http.ResponseWriter, out any) error {
+func (a *App) writeError(ctx context.Context, w http.ResponseWriter, err error) {
 	applyExtras(ctx, w)
-	switch v := out.(type) {
+	kind := rockhandlers.KindOf(err)
+	code := StatusOf(kind)
+	if kind == rockhandlers.KindCanceled {
+		w.WriteHeader(code) // the client is gone: status for logs only
+		return
+	}
+	msg := rockhandlers.MessageOf(err)
+	switch {
+	case kind == rockhandlers.KindInternal:
+		msg = a.internalMessage()
+	case msg == "":
+		msg = http.StatusText(code)
+	}
+	body := ErrorBody{Code: code, Status: http.StatusText(code), Kind: kind.String(), Message: msg, Fields: rockhandlers.FieldsOf(err)}
+	_ = writeJSON(w, code, body)
+}
+
+// writeResult turns the route result into a response.
+func writeResult(ctx context.Context, w http.ResponseWriter, res any, status int) error {
+	applyExtras(ctx, w)
+	switch v := res.(type) {
 	case *File:
 		return writeFile(w, Request(ctx), v)
 	case *Redirect:
@@ -35,9 +83,7 @@ func (c codec) Encode(ctx context.Context, rt rockdelivery.Route, w http.Respons
 		http.Redirect(w, Request(ctx), v.URL, code)
 		return nil
 	}
-
-	status := rockdelivery.MetaOr(rt, metaStatus, 0)
-	if isNil(out) {
+	if reflect.TypeOf(res).Elem().NumField() == 0 { // empty result struct: no body
 		if status == 0 {
 			status = http.StatusNoContent
 		}
@@ -47,47 +93,14 @@ func (c codec) Encode(ctx context.Context, rt rockdelivery.Route, w http.Respons
 	if status == 0 {
 		status = http.StatusOK
 	}
-	return writeJSON(w, status, out)
-}
-
-// ErrorBody is the JSON body of every error response.
-type ErrorBody struct {
-	Code    int    `json:"code"`
-	Status  string `json:"status"`
-	Kind    string `json:"kind"`
-	Message string `json:"message"`
-}
-
-func (c codec) EncodeError(ctx context.Context, _ rockdelivery.Route, w http.ResponseWriter, f rockdelivery.Failure) error {
-	applyExtras(ctx, w)
-	code := StatusOf(f.Kind)
-	return writeJSON(w, code, ErrorBody{Code: code, Status: http.StatusText(code), Kind: f.Kind.String(), Message: f.Message})
-}
-
-// StatusOf maps an error kind to an HTTP status.
-func StatusOf(k rockdelivery.Kind) int {
-	switch k {
-	case rockdelivery.KindInvalid:
-		return http.StatusBadRequest
-	case rockdelivery.KindUnauthorized:
-		return http.StatusUnauthorized
-	case rockdelivery.KindForbidden:
-		return http.StatusForbidden
-	case rockdelivery.KindNotFound:
-		return http.StatusNotFound
-	case rockdelivery.KindConflict:
-		return http.StatusConflict
-	case rockdelivery.KindUnavailable:
-		return http.StatusServiceUnavailable
-	default:
-		return http.StatusInternalServerError
-	}
+	return writeJSON(w, status, res)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) error {
 	body, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("encode JSON: %w", err) // nothing written yet: the pipeline reports it
+		w.WriteHeader(http.StatusInternalServerError)
+		return fmt.Errorf("encode JSON: %w", err)
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -96,6 +109,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) error {
 }
 
 func writeFile(w http.ResponseWriter, r *http.Request, f *File) error {
+	if f.Content == nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		return fmt.Errorf("rockhttp: File.Content is nil")
+	}
 	if c, ok := f.Content.(io.Closer); ok {
 		defer func() { _ = c.Close() }()
 	}
@@ -117,16 +134,4 @@ func writeFile(w http.ResponseWriter, r *http.Request, f *File) error {
 	w.WriteHeader(http.StatusOK)
 	_, err := io.Copy(w, f.Content)
 	return err
-}
-
-func isNil(v any) bool {
-	if v == nil {
-		return true
-	}
-	rv := reflect.ValueOf(v)
-	switch rv.Kind() {
-	case reflect.Pointer, reflect.Map, reflect.Slice, reflect.Interface:
-		return rv.IsNil()
-	}
-	return false
 }

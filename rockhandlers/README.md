@@ -32,10 +32,18 @@ func Create(c *rockhandlers.Ctx[*CreateParams, *CreateResult]) error {
 var CreateOrder = rockhandlers.Chain("orders.create", auth.Bearer, Create)
 ```
 
+Long step signatures can be shortened with a type alias next to the model — the same type, no runtime cost:
+
+```go
+type CreateCtx = rockhandlers.Ctx[*CreateParams, *CreateResult]
+
+func Create(c *CreateCtx) error { … }
+```
+
 - `Ctx[P, R]` holds typed `Params`, filled by the transport, and `Result`, which is allocated before the chain and filled by the steps. P and R are pointer-to-struct types.
 - A step that does not call `c.Next()` ends the chain, so an early successful return (for example, a cache hit) is fine.
 - A repeated `Next()` returns the first result. `Next()` after the last step returns nil.
-- If `Params` implements `Validate() error`, it runs before the first step, and a plain error from it becomes `Invalid`.
+- If `Params` implements `Validate() error`, it runs after the transport has filled `Params` and before the first step: check first, then use. A plain error from it becomes `Invalid`.
 - `Chain` erases the generics. A `Route` is a plain value, so routes of different types fit in one slice.
 
 ## Reusable steps: constraints instead of casts
@@ -73,7 +81,7 @@ route = route.With(Log, rockhandlers.Timeout(5*time.Second))
 
 `With` wraps the route:
 - The first middleware is the outermost, and each `With` call wraps everything added before it. A transport adds its app-level middlewares the same way, with `route.With(...)` at registration.
-- Execution order: transport → `With` → validation → steps.
+- Execution order: transport middlewares → `With` → decoding (the transport fill) → validation → steps.
 - `c.SetContext(ctx)` replaces the context for the rest of the request.
 
 ## Groups
@@ -104,6 +112,7 @@ u := UserKey.MustGet(c)  // panics (→ Internal) if the step that sets it is mi
 - **Constructors:** `Invalid`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `Unavailable`.
 - **Details:** `.WithFields(map)` adds per-field problems; `.Wrap(err)` adds the cause, for logs only.
 - **`KindOf(err)`:**
+  - nil → `KindNone`;
   - an `*Error` → its kind;
   - `context.Canceled` → `KindCanceled`;
   - `context.DeadlineExceeded` → `KindTimeout`;
@@ -123,18 +132,20 @@ For logic that runs on cancellation, use the standard library:
 ## For transports
 
 ```go
-params := route.NewParams()               // a new P
-// fill params from the request
-result, err := route.Serve(ctx, params)   // never panics; on error result is nil
+result, err := route.Serve(ctx, func(params any) error {
+    return decode(req, params) // fill the new P from the request
+})                             // never panics; on error result is nil
 // err → protocol by KindOf(err); result (an R) → protocol
 ```
+
+The fill function runs inside the chain, after the middlewares and before validation, so middlewares see decoding errors and timeouts cover decoding. A plain error from fill becomes `Invalid` with its text; return an `*Error` to control the kind and the message.
 
 `ParamsType()` and `ResultType()` let a transport check routes at startup, for example to refuse a result type it cannot send.
 
 ## Testing
 
 ```go
-res, err := rockhandlers.Run[*CreateParams, *CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1})
+res, err := rockhandlers.Run[*CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1}) // P is inferred
 ```
 
 `Run` executes the whole chain (middlewares, validation, steps) without a transport. Steps are plain functions and can also be tested alone.

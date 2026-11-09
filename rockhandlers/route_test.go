@@ -72,7 +72,7 @@ func params(token string, qty int) *CreateParams {
 
 func TestChainInfersGenericSteps(t *testing.T) {
 	route := rh.Chain("orders.create", Bearer, create) // Bearer instantiated from create's types
-	res, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("ann", 1))
+	res, err := rh.Run[*CreateResult](context.Background(), route, params("ann", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,10 +83,10 @@ func TestChainInfersGenericSteps(t *testing.T) {
 
 func TestGroupFunction(t *testing.T) {
 	route := Secured("orders.create", create)
-	if _, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("", 1)); rh.KindOf(err) != rh.KindUnauthorized {
+	if _, err := rh.Run[*CreateResult](context.Background(), route, params("", 1)); rh.KindOf(err) != rh.KindUnauthorized {
 		t.Fatalf("err = %v", err)
 	}
-	res, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("bob", 1))
+	res, err := rh.Run[*CreateResult](context.Background(), route, params("bob", 1))
 	if err != nil || res.Owner != "bob" {
 		t.Fatalf("res = %+v, err = %v", res, err)
 	}
@@ -94,7 +94,7 @@ func TestGroupFunction(t *testing.T) {
 
 func TestValidation(t *testing.T) {
 	route := rh.Chain("orders.create", Bearer, create)
-	_, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("ann", 0))
+	_, err := rh.Run[*CreateResult](context.Background(), route, params("ann", 0))
 	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "qty must be > 0" {
 		t.Fatalf("err = %v", err)
 	}
@@ -124,7 +124,7 @@ func mw(log *[]string, name string) rh.Middleware {
 func TestOrder(t *testing.T) {
 	var log []string
 	route := rh.Chain("r", rec("s1"), rec("s2")).With(mw(&log, "a"), mw(&log, "b")).With(mw(&log, "transport"))
-	res, err := rh.Run[*P, *R](context.Background(), route, &P{})
+	res, err := rh.Run[*R](context.Background(), route, &P{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,11 +153,11 @@ func TestEarlyExitAndRepeatedNext(t *testing.T) {
 	count := func(c *rh.Ctx[*P, *R]) error { calls++; return c.Next() }
 	route := rh.Chain("r", cache, count)
 
-	res, err := rh.Run[*P, *R](context.Background(), route, &P{N: 1})
+	res, err := rh.Run[*R](context.Background(), route, &P{N: 1})
 	if err != nil || res.Log[0] != "cached" || calls != 0 {
 		t.Fatalf("early exit: res %+v, err %v, calls %d", res, err, calls)
 	}
-	if _, err := rh.Run[*P, *R](context.Background(), route, &P{N: 2}); err != nil || calls != 1 {
+	if _, err := rh.Run[*R](context.Background(), route, &P{N: 2}); err != nil || calls != 1 {
 		t.Fatalf("repeated Next: err %v, calls %d", err, calls)
 	}
 }
@@ -169,7 +169,7 @@ func TestErrorDropsResult(t *testing.T) {
 		c.Result.Log = []string{"partial"}
 		return rh.Conflict("duplicate")
 	})
-	res, err := route.Serve(context.Background(), &P{})
+	res, err := route.Serve(context.Background(), nil)
 	if res != nil || rh.KindOf(err) != rh.KindConflict {
 		t.Fatalf("res %v, err %v", res, err)
 	}
@@ -180,7 +180,7 @@ func TestPanicBecomesInternalAndMiddlewareSeesIt(t *testing.T) {
 	catch := func(c rh.Context) error { seen = c.Next(); return seen }
 	route := rh.Chain("r", func(*rh.Ctx[*P, *R]) error { panic("boom") }).With(catch)
 
-	_, err := route.Serve(context.Background(), &P{})
+	_, err := route.Serve(context.Background(), nil)
 	var pe *rh.PanicError
 	if rh.KindOf(err) != rh.KindInternal || !errors.As(err, &pe) || pe.Value != "boom" || len(pe.Stack) == 0 {
 		t.Fatalf("err = %v", err)
@@ -194,14 +194,14 @@ func TestPanicBecomesInternalAndMiddlewareSeesIt(t *testing.T) {
 
 	// panic in a middleware too
 	route = rh.Chain("r", rec("s")).With(func(rh.Context) error { panic("mw") })
-	if _, err := route.Serve(context.Background(), &P{}); rh.KindOf(err) != rh.KindInternal {
+	if _, err := route.Serve(context.Background(), nil); rh.KindOf(err) != rh.KindInternal {
 		t.Fatalf("mw panic: %v", err)
 	}
 }
 
 func TestMustGetMissing(t *testing.T) {
 	route := rh.Chain("r", func(c *rh.Ctx[*P, *R]) error { _ = UserKey.MustGet(c); return nil })
-	_, err := route.Serve(context.Background(), &P{})
+	_, err := route.Serve(context.Background(), nil)
 	var pe *rh.PanicError
 	if !errors.As(err, &pe) || !strings.Contains(pe.Error(), `local "user" is not set`) {
 		t.Fatalf("err = %v", err)
@@ -234,13 +234,13 @@ func TestCanceledStopsBetweenSteps(t *testing.T) {
 		func(c *rh.Ctx[*P, *R]) error { cancel(); return c.Next() },
 		func(c *rh.Ctx[*P, *R]) error { ran = true; return nil },
 	)
-	_, err := route.Serve(ctx, &P{})
+	_, err := route.Serve(ctx, nil)
 	if ran || rh.KindOf(err) != rh.KindCanceled {
 		t.Fatalf("ran %v, err %v", ran, err)
 	}
 
 	// already cancelled: nothing runs
-	if _, err := route.Serve(ctx, &P{}); rh.KindOf(err) != rh.KindCanceled {
+	if _, err := route.Serve(ctx, nil); rh.KindOf(err) != rh.KindCanceled {
 		t.Fatalf("err %v", err)
 	}
 }
@@ -259,7 +259,7 @@ func TestTimeoutIsCooperativeAndRestored(t *testing.T) {
 	}).With(outer, rh.Timeout(20*time.Millisecond))
 
 	start := time.Now()
-	_, err := route.Serve(context.Background(), &P{})
+	_, err := route.Serve(context.Background(), nil)
 	if rh.KindOf(err) != rh.KindTimeout || time.Since(start) > 2*time.Second {
 		t.Fatalf("err %v after %v", err, time.Since(start))
 	}
@@ -281,7 +281,7 @@ func TestCtxIsContext(t *testing.T) {
 		}
 		return nil
 	})
-	if _, err := route.Serve(ctx, &P{}); err != nil {
+	if _, err := route.Serve(ctx, nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -289,28 +289,50 @@ func TestCtxIsContext(t *testing.T) {
 // --- transport contract ---
 
 func TestTransportContract(t *testing.T) {
-	route := rh.Chain("r", rec("s"))
+	var log []string
+	route := rh.Chain("r", rec("s")).With(func(c rh.Context) error {
+		err := c.Next()
+		log = append(log, rh.KindOf(err).String())
+		return err
+	})
 	if route.Name() != "r" || route.ParamsType() != reflect.TypeFor[*P]() || route.ResultType() != reflect.TypeFor[*R]() {
 		t.Fatal("accessors")
 	}
-	p, ok := route.NewParams().(*P)
-	if !ok || p == nil {
-		t.Fatalf("NewParams = %T", route.NewParams())
-	}
-	res, err := route.Serve(context.Background(), p)
+
+	// fill gets a fresh *P inside the chain
+	res, err := route.Serve(context.Background(), func(p any) error { p.(*P).N = 7; return nil })
 	if _, ok := res.(*R); !ok || err != nil {
 		t.Fatalf("Serve = %T, %v", res, err)
 	}
-	for _, bad := range []any{nil, (*P)(nil), &R{}} {
-		if _, err := route.Serve(context.Background(), bad); rh.KindOf(err) != rh.KindInternal {
-			t.Fatalf("Serve(%T): err %v", bad, err)
-		}
+
+	// a plain fill error becomes Invalid; an *Error keeps its kind; middlewares see both
+	_, err = route.Serve(context.Background(), func(any) error { return errors.New("bad json") })
+	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "bad json" {
+		t.Fatalf("plain fill error: %v", err)
 	}
-	if _, err := rh.Run[*R, *R](context.Background(), route, &R{}); err == nil {
-		t.Fatal("Run with wrong types: no error")
+	_, err = route.Serve(context.Background(), func(any) error { return rh.Unauthorized("no") })
+	if rh.KindOf(err) != rh.KindUnauthorized {
+		t.Fatalf("*Error from fill: %v", err)
 	}
-	if _, err := (rh.Route{}).Serve(context.Background(), &P{}); err == nil {
+	_, err = route.Serve(context.Background(), func(any) error { panic("decoder") })
+	if rh.KindOf(err) != rh.KindInternal {
+		t.Fatalf("panic in fill: %v", err)
+	}
+	if got := strings.Join(log, " "); got != "none invalid unauthorized internal" {
+		t.Fatalf("middleware saw: %s", got)
+	}
+
+	if _, err := rh.Run[*R](context.Background(), route, &R{}); err == nil {
+		t.Fatal("Run with wrong params type: no error")
+	}
+	if _, err := rh.Run[*R](context.Background(), route, (*P)(nil)); err == nil {
+		t.Fatal("Run with nil params: no error")
+	}
+	if _, err := (rh.Route{}).Serve(context.Background(), nil); err == nil {
 		t.Fatal("zero Route Serve: no error")
+	}
+	if rh.KindOf(nil) != rh.KindNone {
+		t.Fatal("KindOf(nil)")
 	}
 }
 
@@ -323,7 +345,7 @@ func TestChainPanicsOnWiringBugs(t *testing.T) {
 		"non-ptr P":  func() { rh.Chain("r", func(*rh.Ctx[S, *R]) error { return nil }) },
 		"non-ptr R":  func() { rh.Chain("r", func(*rh.Ctx[*P, int]) error { return nil }) },
 		"nil mw":     func() { rh.Chain("r", rec("s")).With(nil) },
-		"zero route": func() { (rh.Route{}).NewParams() },
+		"zero route": func() { (rh.Route{}).With() },
 		"timeout 0":  func() { rh.Timeout(0) },
 	}
 	for name, f := range cases {

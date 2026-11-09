@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/arzab/gorock-kit/rockdelivery"
+	"github.com/arzab/gorock-kit/rockhandlers"
 )
 
 // Config is file-loadable with rockconfig.
@@ -19,56 +20,52 @@ type Config struct {
 	Prefix          string        `config:",omitempty"`              // e.g. "/api/v1"
 	ShutdownTimeout time.Duration `config:",default=30s"`            // graceful shutdown bound
 	ReadTimeout     time.Duration `config:",default=15s"`            // whole request read
-	WriteTimeout    time.Duration `config:",omitempty"`              // 0 = none (streaming downloads)
+	WriteTimeout    time.Duration `config:",omitempty"`              // 0 = none (long downloads)
 	MaxBodyBytes    int64         `config:",default=10485760"`       // 10 MiB
 	InternalMessage string        `config:",default=internal error"` // client text for Internal errors
 
 	// Code only.
-	OnFailure  func(ctx context.Context, f rockdelivery.Failure)                              `config:"-"`
-	Observe    func(ctx context.Context, r rockdelivery.Route, err error, took time.Duration) `config:"-"`
-	Middleware []func(http.Handler) http.Handler                                              `config:"-"` // net/http level: CORS, compression...
+
+	// OnError is called when writing a response fails after the chain
+	// succeeded (headers may be sent already). Chain errors, including
+	// decoding, go through rockhandlers middlewares — log them there.
+	OnError func(r *http.Request, route string, err error) `config:"-"`
+	// Middleware wraps the router at the net/http level: CORS, gzip, ...
+	Middleware []func(http.Handler) http.Handler `config:"-"`
 }
 
-// App is an HTTP server serving rockdelivery endpoints. It implements
+// App is an HTTP server serving rockhandlers routes. It implements
 // rockengine.App.
 type App struct {
 	cfg       Config
 	endpoints []Endpoint
+	mws       []rockhandlers.Middleware
 
 	mu      sync.Mutex
 	server  *http.Server
 	handler http.Handler
 }
 
-// New creates the app. Register it with the engine; it starts on Exec.
+// New creates the app. Register it with the engine; it listens on Exec.
 func New(cfg Config, endpoints ...Endpoint) *App {
 	return &App{cfg: cfg, endpoints: endpoints}
 }
 
-// Init builds the router. Configuration errors (duplicate routes, bad
-// patterns) fail here, not at Exec.
+// Use adds rockhandlers middlewares around every endpoint (outermost first).
+// Call it before Init.
+func (a *App) Use(mws ...rockhandlers.Middleware) *App {
+	a.mws = append(a.mws, mws...)
+	return a
+}
+
+// Init builds the router. Configuration errors (bad or duplicate endpoints)
+// fail here, not at Exec.
 func (a *App) Init(context.Context) (err error) {
 	if a.cfg.Port == "" {
 		return errors.New("rockhttp: Port must not be empty")
 	}
-	maxBody := a.cfg.MaxBodyBytes
-	if maxBody <= 0 {
-		maxBody = 10 << 20
-	}
-	opts := []rockdelivery.PipelineOption{}
-	if a.cfg.InternalMessage != "" {
-		opts = append(opts, rockdelivery.InternalMessage(a.cfg.InternalMessage))
-	}
-	if a.cfg.OnFailure != nil {
-		opts = append(opts, rockdelivery.OnFailure(a.cfg.OnFailure))
-	}
-	if a.cfg.Observe != nil {
-		opts = append(opts, rockdelivery.Observe(a.cfg.Observe))
-	}
-	pipe := rockdelivery.NewPipeline[*http.Request, http.ResponseWriter](codec{maxBody: maxBody}, opts...)
-
 	mux := http.NewServeMux()
-	defer func() { // ServeMux panics on conflicting patterns
+	defer func() { // ServeMux and Route.With panic on bad input
 		if r := recover(); r != nil {
 			err = fmt.Errorf("rockhttp: %v", r)
 		}
@@ -77,13 +74,14 @@ func (a *App) Init(context.Context) (err error) {
 	if prefix == "/" {
 		prefix = ""
 	}
-	for _, ep := range a.endpoints {
-		route := ep.route
-		method, _ := rockdelivery.Meta(route, metaMethod)
-		pattern, _ := rockdelivery.Meta(route, metaPattern)
-		mux.HandleFunc(method+" "+prefix+pattern, func(w http.ResponseWriter, r *http.Request) {
-			ctx := withExchange(r.Context(), r)
-			_ = pipe.Serve(ctx, route, r, w) // the answer is written; failures go to OnFailure
+	for i, ep := range a.endpoints {
+		if ep.Method == "" || ep.Path == "" || ep.Handler.ParamsType() == nil {
+			return fmt.Errorf("rockhttp: endpoint %d (%s %s): Method, Path and Handler are required", i, ep.Method, ep.Path)
+		}
+		route := ep.Handler.With(a.mws...)
+		status := ep.Status
+		mux.HandleFunc(ep.Method+" "+prefix+ep.Path, func(w http.ResponseWriter, r *http.Request) {
+			a.serve(w, r, route, status)
 		})
 	}
 
@@ -102,6 +100,47 @@ func (a *App) Init(context.Context) (err error) {
 	}
 	a.mu.Unlock()
 	return nil
+}
+
+// serve: run the chain (binding is its fill link) → write the result or the error.
+func (a *App) serve(w http.ResponseWriter, r *http.Request, route rockhandlers.Route, status int) {
+	ctx := withExchange(r.Context(), r)
+	defer func() { // the chain never panics; this guards writing the response
+		if v := recover(); v != nil {
+			err := &rockhandlers.Error{Kind: rockhandlers.KindInternal, Err: &rockhandlers.PanicError{Value: v, Stack: debug.Stack()}}
+			a.report(r, route.Name(), err)
+		}
+	}()
+
+	maxBody := a.maxBody()
+	res, err := route.Serve(ctx, func(params any) error { return bind(r, params, maxBody) })
+	if err != nil {
+		a.writeError(ctx, w, err)
+		return
+	}
+	if err := writeResult(ctx, w, res, status); err != nil {
+		a.report(r, route.Name(), err) // headers may be sent already: only report
+	}
+}
+
+func (a *App) report(r *http.Request, route string, err error) {
+	if a.cfg.OnError != nil {
+		a.cfg.OnError(r, route, err)
+	}
+}
+
+func (a *App) maxBody() int64 {
+	if a.cfg.MaxBodyBytes > 0 {
+		return a.cfg.MaxBodyBytes
+	}
+	return 10 << 20
+}
+
+func (a *App) internalMessage() string {
+	if a.cfg.InternalMessage != "" {
+		return a.cfg.InternalMessage
+	}
+	return "internal error"
 }
 
 // Handler returns the router built by Init — handy for httptest.

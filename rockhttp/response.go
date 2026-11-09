@@ -8,7 +8,7 @@ import (
 )
 
 // File is a result that streams a file instead of JSON. Use it as the
-// handler's Out: rockdelivery.Handler[In, rockhttp.File].
+// route's result type: rockhandlers.Handler[*Params, *rockhttp.File].
 type File struct {
 	Name        string    // download name; sets Content-Disposition when Download is true
 	ContentType string    // default: detected from Name, else application/octet-stream

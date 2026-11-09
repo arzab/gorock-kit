@@ -15,7 +15,6 @@ jobs:
         module:
           - rockconfig
           - rockengine
-          - rockdelivery
           - rockservices
           - rockhandlers
           - rockhttp

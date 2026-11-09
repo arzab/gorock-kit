@@ -7,9 +7,10 @@ The core of [GOROCK](https://arzab.github.io/gorock/) — the structural pieces 
 | [rockengine](./rockengine) | Apps lifecycle: start in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
 | [rockconfig](./rockconfig) | One config file (YAML/JSON) → typed `Configs`: snake_case mapping, `${ENV:-default}`, defaults, required fields and unknown-key checks |
 | [rockservices](./rockservices) | Services layer: one catalog that creates, stores by name, hands out, initialises and stops the services of `pkg/services` |
-| [rockdelivery](./rockdelivery) | Delivery contract: business logic as typed functions `func(ctx, *In) (*Out, error)`, transport-independent error kinds, validation, middleware — any App can serve them |
+| [rockhandlers](./rockhandlers) | Transport-independent request handling: a chain of typed steps with `Next`, Locals, middlewares, validation, panic recovery and error kinds — any transport (HTTP, queue, CLI) runs the same routes |
+| [rockhttp](./rockhttp) | **Experimental** HTTP transport for rockhandlers on `net/http`; may move to gorock-catalog |
 
-Go 1.26+. `rockengine`, `rockservices` and `rockdelivery` use only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
+Go 1.26+. `rockengine`, `rockservices`, `rockhandlers` and `rockhttp` use only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
 
 HTTP server, PostgreSQL/Redis services, logger, event bus, scheduler and Telegram bot were moved out of the kit to `gorock-catalog` (a separate repository, not published yet). Their last versions here, `v0.2.0`, stay available.
 
@@ -84,7 +85,7 @@ Where each piece of code goes and why: [GOROCK architecture](https://arzab.githu
 go get github.com/arzab/gorock-kit/rockengine
 go get github.com/arzab/gorock-kit/rockconfig
 go get github.com/arzab/gorock-kit/rockservices
-go get github.com/arzab/gorock-kit/rockdelivery
+go get github.com/arzab/gorock-kit/rockhandlers
 ```
 
 ## AI coding agents

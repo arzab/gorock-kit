@@ -20,20 +20,20 @@ type message struct {
 type outcome string
 
 func consume(route rh.Route, m message) (outcome, any) {
-	p := route.NewParams()
-	if err := json.Unmarshal([]byte(m.Body), p); err != nil {
-		return "reject", nil
-	}
-	if a, ok := p.(interface{ setAuth(string) }); ok { // the transport's own binding
-		a.setAuth(m.Headers["authorization"])
-	}
-	res, err := route.Serve(context.Background(), p)
-	switch rh.KindOf(err) {
-	case rh.KindInternal, rh.KindUnavailable, rh.KindCanceled, rh.KindTimeout:
-		if err != nil {
-			return "requeue", nil
+	res, err := route.Serve(context.Background(), func(p any) error {
+		if err := json.Unmarshal([]byte(m.Body), p); err != nil {
+			return err // → Invalid
 		}
+		if a, ok := p.(interface{ setAuth(string) }); ok { // the transport's own binding
+			a.setAuth(m.Headers["authorization"])
+		}
+		return nil
+	})
+	switch rh.KindOf(err) {
+	case rh.KindNone:
 		return "ack", res
+	case rh.KindInternal, rh.KindUnavailable, rh.KindCanceled, rh.KindTimeout:
+		return "requeue", nil
 	default:
 		return "reject", nil
 	}

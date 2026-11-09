@@ -15,75 +15,78 @@ import (
 	"testing"
 	"time"
 
-	"github.com/arzab/gorock-kit/rockdelivery"
+	rh "github.com/arzab/gorock-kit/rockhandlers"
 )
 
-type createIn struct {
+// --- a reusable step + embeddable model, as the catalog would ship them ---
+
+type BearerAuth struct {
+	Authorization string `header:"Authorization" json:"-"`
+}
+
+func (a *BearerAuth) BearerToken() string { return strings.TrimPrefix(a.Authorization, "Bearer ") }
+
+type TokenParams interface{ BearerToken() string }
+
+var UserKey = rh.NewLocal[string]("user")
+
+func Bearer[P TokenParams, R any](c *rh.Ctx[P, R]) error {
+	if c.Params.BearerToken() == "" {
+		return rh.Unauthorized("token required")
+	}
+	UserKey.Set(c, c.Params.BearerToken())
+	return c.Next()
+}
+
+// a group is a plain function
+func Secured[P TokenParams, R any](name string, steps ...rh.Handler[P, R]) rh.Route {
+	return rh.Chain(name, rh.Prepend(steps, Bearer[P, R])...)
+}
+
+// --- models and steps ---
+
+type CreateParams struct {
+	BearerAuth
 	ShopID int      `path:"shop"`
 	DryRun bool     `query:"dry_run"`
 	Tags   []string `query:"tag"`
-	Token  string   `header:"X-Token"`
 	Item   string   `json:"item"`
 	Qty    int      `json:"qty"`
 }
 
-func (in *createIn) Validate() error {
-	if in.Qty <= 0 {
-		return errors.New("qty must be > 0")
+func (p *CreateParams) Validate() error {
+	if p.Qty <= 0 {
+		return rh.Invalid("invalid order").WithFields(map[string]string{"qty": "must be > 0"})
 	}
 	return nil
 }
 
-type createOut struct {
+type CreateResult struct {
 	Shop   int      `json:"shop"`
 	Item   string   `json:"item"`
 	DryRun bool     `json:"dry_run"`
 	Tags   []string `json:"tags"`
-	Token  string   `json:"token"`
+	Owner  string   `json:"owner"`
 }
 
-func create(_ context.Context, in *createIn) (*createOut, error) {
-	return &createOut{Shop: in.ShopID, Item: in.Item, DryRun: in.DryRun, Tags: in.Tags, Token: in.Token}, nil
+func create(c *rh.Ctx[*CreateParams, *CreateResult]) error {
+	p := c.Params
+	*c.Result = CreateResult{Shop: p.ShopID, Item: p.Item, DryRun: p.DryRun, Tags: p.Tags, Owner: UserKey.MustGet(c)}
+	return nil
 }
 
-type idIn struct {
+type IDParams struct {
 	ID int `path:"id"`
 }
+type Empty struct{}
 
-type uploadIn struct {
-	Title string                  `form:"title"`
-	File  *multipart.FileHeader   `form:"file"`
-	More  []*multipart.FileHeader `form:"more"`
-}
+// --- helpers ---
 
-type uploadOut struct {
-	Title string `json:"title"`
-	Name  string `json:"name"`
-	Body  string `json:"body"`
-	More  int    `json:"more"`
-}
-
-func upload(_ context.Context, in *uploadIn) (*uploadOut, error) {
-	if in.File == nil {
-		return nil, rockdelivery.Invalid("file is required")
-	}
-	f, err := in.File.Open()
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }()
-	b, _ := io.ReadAll(f)
-	return &uploadOut{Title: in.Title, Name: in.File.Filename, Body: string(b), More: len(in.More)}, nil
-}
-
-type nothing struct{}
-
-func newTestApp(t *testing.T, cfg Config, eps ...Endpoint) http.Handler {
+func handler(t *testing.T, a *App) http.Handler {
 	t.Helper()
-	if cfg.Port == "" {
-		cfg.Port = "0"
+	if a.cfg.Port == "" {
+		a.cfg.Port = "0"
 	}
-	a := New(cfg, eps...)
 	if err := a.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
@@ -96,6 +99,12 @@ func do(h http.Handler, req *http.Request) *httptest.ResponseRecorder {
 	return rec
 }
 
+func jsonReq(method, url, body string) *http.Request {
+	req := httptest.NewRequest(method, url, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
 func decodeBody[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 	t.Helper()
 	var v T
@@ -105,89 +114,143 @@ func decodeBody[T any](t *testing.T, rec *httptest.ResponseRecorder) T {
 	return v
 }
 
-func TestBindAllSources(t *testing.T) {
-	h := newTestApp(t, Config{Prefix: "/api/"},
-		POST("/shops/{shop}/orders", create, Status(http.StatusCreated)))
+// --- tests ---
 
-	req := httptest.NewRequest(http.MethodPost, "/api/shops/7/orders?dry_run=true&tag=a&tag=b",
-		strings.NewReader(`{"item":"tea","qty":2}`))
-	req.Header.Set("Content-Type", "application/json; charset=utf-8")
-	req.Header.Set("X-Token", "secret")
-	rec := do(h, req)
-
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+func TestFullChain(t *testing.T) {
+	var log []string
+	logMW := func(c rh.Context) error {
+		err := c.Next()
+		log = append(log, c.Route()+":"+rh.KindOf(err).String())
+		return err
 	}
-	got := decodeBody[createOut](t, rec)
-	if got.Shop != 7 || got.Item != "tea" || !got.DryRun || len(got.Tags) != 2 || got.Token != "secret" {
+	h := handler(t, New(Config{Prefix: "/api/"},
+		Endpoint{Method: "POST", Path: "/shops/{shop}/orders", Handler: Secured("orders.create", create), Status: http.StatusCreated},
+	).Use(logMW))
+
+	req := jsonReq("POST", "/api/shops/7/orders?dry_run=true&tag=a&tag=b", `{"item":"tea","qty":2}`)
+	req.Header.Set("Authorization", "Bearer ann")
+	rec := do(h, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
+	}
+	got := decodeBody[CreateResult](t, rec)
+	if got.Shop != 7 || got.Item != "tea" || !got.DryRun || len(got.Tags) != 2 || got.Owner != "ann" {
 		t.Fatalf("got %+v", got)
+	}
+
+	// no token → 401 from the step that needs the embedded model
+	rec = do(h, jsonReq("POST", "/api/shops/7/orders", `{"item":"tea","qty":2}`))
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status %d", rec.Code)
+	}
+
+	// validation with fields
+	req = jsonReq("POST", "/api/shops/7/orders", `{"item":"tea","qty":0}`)
+	req.Header.Set("Authorization", "Bearer ann")
+	rec = do(h, req)
+	body := decodeBody[ErrorBody](t, rec)
+	if rec.Code != 400 || body.Kind != "invalid" || body.Fields["qty"] != "must be > 0" {
+		t.Fatalf("status %d, body %+v", rec.Code, body)
+	}
+
+	if got := strings.Join(log, " "); got != "orders.create:none orders.create:unauthorized orders.create:invalid" {
+		t.Fatalf("middleware log: %s", got)
 	}
 }
 
 func TestErrors(t *testing.T) {
-	var failures []rockdelivery.Failure
-	h := newTestApp(t, Config{OnFailure: func(_ context.Context, f rockdelivery.Failure) { failures = append(failures, f) }},
-		POST("/shops/{shop}/orders", create),
-		GET("/missing/{id}", func(_ context.Context, in *idIn) (*nothing, error) {
-			return nil, rockdelivery.NotFound("order %d not found", in.ID)
-		}),
-		GET("/boom", func(context.Context, *nothing) (*nothing, error) {
-			return nil, errors.New("db password leaked")
-		}),
-		GET("/panic", func(context.Context, *nothing) (*nothing, error) { panic("oops") }),
-	)
+	var reported []string
+	logMW := func(c rh.Context) error {
+		err := c.Next()
+		if err != nil {
+			reported = append(reported, c.Route())
+		}
+		return err
+	}
+	route := func(name string, fn rh.Handler[*IDParams, *Empty]) rh.Route { return rh.Chain(name, fn) }
+	h := handler(t, New(Config{},
+		Endpoint{Method: "GET", Path: "/missing/{id}", Handler: route("missing", func(c *rh.Ctx[*IDParams, *Empty]) error {
+			return rh.NotFound("order %d not found", c.Params.ID)
+		})},
+		Endpoint{Method: "GET", Path: "/boom", Handler: route("boom", func(*rh.Ctx[*IDParams, *Empty]) error {
+			return errors.New("db password leaked")
+		})},
+		Endpoint{Method: "GET", Path: "/panic", Handler: route("panic", func(*rh.Ctx[*IDParams, *Empty]) error { panic("oops") })},
+		Endpoint{Method: "GET", Path: "/slow", Handler: route("slow", func(c *rh.Ctx[*IDParams, *Empty]) error {
+			<-c.Done()
+			return c.Err()
+		}).With(rh.Timeout(10 * time.Millisecond))},
+		Endpoint{Method: "DELETE", Path: "/orders/{id}", Handler: route("delete", func(*rh.Ctx[*IDParams, *Empty]) error { return nil })},
+	).Use(logMW))
 
 	cases := []struct {
-		name, method, url, body string
-		code                    int
-		kind, msg               string
+		method, url string
+		code        int
+		kind, msg   string
 	}{
-		{"validate", http.MethodPost, "/shops/1/orders", `{"qty":0}`, 400, "invalid", "qty must be > 0"},
-		{"bad json", http.MethodPost, "/shops/1/orders", `{"qty":`, 400, "invalid", ""},
-		{"bad path", http.MethodPost, "/shops/x/orders", `{"qty":1}`, 400, "invalid", `path "shop": "x" is not an integer`},
-		{"not found", http.MethodGet, "/missing/42", "", 404, "not_found", "order 42 not found"},
-		{"internal hidden", http.MethodGet, "/boom", "", 500, "internal", "internal error"},
-		{"panic hidden", http.MethodGet, "/panic", "", 500, "internal", "internal error"},
+		{"GET", "/missing/42", 404, "not_found", "order 42 not found"},
+		{"GET", "/missing/x", 400, "invalid", `path "id": "x" is not an integer`},
+		{"GET", "/boom", 500, "internal", "internal error"},
+		{"GET", "/panic", 500, "internal", "internal error"},
+		{"GET", "/slow", 504, "timeout", "Gateway Timeout"},
 	}
 	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			req := httptest.NewRequest(c.method, c.url, strings.NewReader(c.body))
-			if c.body != "" {
-				req.Header.Set("Content-Type", "application/json")
-			}
-			rec := do(h, req)
-			if rec.Code != c.code {
-				t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
-			}
-			got := decodeBody[ErrorBody](t, rec)
-			if got.Kind != c.kind || (c.msg != "" && got.Message != c.msg) {
-				t.Fatalf("got %+v", got)
-			}
-		})
+		rec := do(h, httptest.NewRequest(c.method, c.url, nil))
+		body := decodeBody[ErrorBody](t, rec)
+		if rec.Code != c.code || body.Kind != c.kind || body.Message != c.msg {
+			t.Fatalf("%s %s: status %d, body %+v", c.method, c.url, rec.Code, body)
+		}
 	}
-	if len(failures) != len(cases) {
-		t.Fatalf("failures reported = %d, want %d", len(failures), len(cases))
+	if len(reported) != len(cases) {
+		t.Fatalf("middleware saw errors of %v (decode errors included)", reported)
+	}
+
+	// empty result struct → 204
+	if rec := do(h, httptest.NewRequest("DELETE", "/orders/1", nil)); rec.Code != 204 || rec.Body.Len() != 0 {
+		t.Fatalf("delete: %d %q", rec.Code, rec.Body)
+	}
+	// method not allowed — net/http itself
+	if rec := do(h, httptest.NewRequest("GET", "/orders/1", nil)); rec.Code != 405 {
+		t.Fatalf("405: %d", rec.Code)
+	}
+
+	// client went away → 499, no body
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := do(h, httptest.NewRequest("GET", "/slow", nil).WithContext(ctx))
+	if rec.Code != StatusClientClosedRequest || rec.Body.Len() != 0 {
+		t.Fatalf("canceled: %d %q", rec.Code, rec.Body)
 	}
 }
 
-func TestNilResultIsNoContent(t *testing.T) {
-	h := newTestApp(t, Config{},
-		DELETE("/orders/{id}", func(context.Context, *idIn) (*nothing, error) { return nil, nil }))
-	rec := do(h, httptest.NewRequest(http.MethodDelete, "/orders/1", nil))
-	if rec.Code != http.StatusNoContent || rec.Body.Len() != 0 {
-		t.Fatalf("status = %d, body %q", rec.Code, rec.Body)
-	}
+// --- awkward cases: upload, download, redirect + cookie ---
+
+type UploadParams struct {
+	Title string                  `form:"title"`
+	File  *multipart.FileHeader   `form:"file"`
+	More  []*multipart.FileHeader `form:"more"`
+}
+type UploadResult struct {
+	Title, Name, Body string
+	More              int
 }
 
-func TestMethodNotAllowed(t *testing.T) {
-	h := newTestApp(t, Config{}, DELETE("/orders/{id}", func(context.Context, *idIn) (*nothing, error) { return nil, nil }))
-	if rec := do(h, httptest.NewRequest(http.MethodGet, "/orders/1", nil)); rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("status = %d", rec.Code)
+func upload(c *rh.Ctx[*UploadParams, *UploadResult]) error {
+	if c.Params.File == nil {
+		return rh.Invalid("file is required")
 	}
+	f, err := c.Params.File.Open()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = f.Close() }()
+	b, _ := io.ReadAll(f)
+	*c.Result = UploadResult{Title: c.Params.Title, Name: c.Params.File.Filename, Body: string(b), More: len(c.Params.More)}
+	return nil
 }
 
 func TestUpload(t *testing.T) {
-	h := newTestApp(t, Config{}, POST("/files", upload))
+	h := handler(t, New(Config{}, Endpoint{Method: "POST", Path: "/files", Handler: rh.Chain("upload", upload)}))
 
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
@@ -200,87 +263,66 @@ func TestUpload(t *testing.T) {
 	}
 	_ = mw.Close()
 
-	req := httptest.NewRequest(http.MethodPost, "/files", &buf)
+	req := httptest.NewRequest("POST", "/files", &buf)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	rec := do(h, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
-	}
-	got := decodeBody[uploadOut](t, rec)
-	if got.Title != "report" || got.Name != "a.txt" || got.Body != "hello" || got.More != 2 {
-		t.Fatalf("got %+v", got)
+	got := decodeBody[UploadResult](t, rec)
+	if rec.Code != 200 || got.Title != "report" || got.Name != "a.txt" || got.Body != "hello" || got.More != 2 {
+		t.Fatalf("status %d, got %+v", rec.Code, got)
 	}
 }
 
 func TestBodyLimit(t *testing.T) {
-	h := newTestApp(t, Config{MaxBodyBytes: 10}, POST("/shops/{shop}/orders", create))
-	req := httptest.NewRequest(http.MethodPost, "/shops/1/orders", strings.NewReader(`{"item":"`+strings.Repeat("x", 100)+`","qty":1}`))
-	req.Header.Set("Content-Type", "application/json")
-	rec := do(h, req)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "larger than 10 bytes") {
-		t.Fatalf("status = %d, body %s", rec.Code, rec.Body)
+	h := handler(t, New(Config{MaxBodyBytes: 10}, Endpoint{Method: "POST", Path: "/shops/{shop}/orders", Handler: rh.Chain("c", create)}))
+	rec := do(h, jsonReq("POST", "/shops/1/orders", `{"item":"`+strings.Repeat("x", 100)+`","qty":1}`))
+	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "larger than 10 bytes") {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body)
 	}
 }
 
 func TestDownload(t *testing.T) {
-	h := newTestApp(t, Config{},
-		GET("/files/{id}", func(context.Context, *idIn) (*File, error) {
-			return &File{Name: "report.csv", Content: strings.NewReader("a,b\n1,2\n"), Download: true}, nil
-		}))
+	h := handler(t, New(Config{}, Endpoint{Method: "GET", Path: "/files/{id}", Handler: rh.Chain("download",
+		func(c *rh.Ctx[*IDParams, *File]) error {
+			*c.Result = File{Name: "report.csv", Content: strings.NewReader("a,b\n1,2\n"), Download: true}
+			return nil
+		})}))
 
-	rec := do(h, httptest.NewRequest(http.MethodGet, "/files/1", nil))
-	if rec.Code != http.StatusOK || rec.Body.String() != "a,b\n1,2\n" {
-		t.Fatalf("status = %d, body %q", rec.Code, rec.Body)
+	rec := do(h, httptest.NewRequest("GET", "/files/1", nil))
+	if rec.Code != 200 || rec.Body.String() != "a,b\n1,2\n" || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/csv") ||
+		rec.Header().Get("Content-Disposition") != "attachment; filename=report.csv" {
+		t.Fatalf("status %d, headers %v, body %q", rec.Code, rec.Header(), rec.Body)
 	}
-	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/csv") {
-		t.Fatalf("Content-Type = %q", ct)
-	}
-	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename=report.csv` {
-		t.Fatalf("Content-Disposition = %q", cd)
-	}
-
-	// strings.Reader is a ReadSeeker: ranges work.
-	req := httptest.NewRequest(http.MethodGet, "/files/1", nil)
+	req := httptest.NewRequest("GET", "/files/1", nil)
 	req.Header.Set("Range", "bytes=0-2")
 	if rec = do(h, req); rec.Code != http.StatusPartialContent || rec.Body.String() != "a,b" {
-		t.Fatalf("range: status = %d, body %q", rec.Code, rec.Body)
+		t.Fatalf("range: %d %q", rec.Code, rec.Body)
 	}
 }
 
-func TestRedirectAndCookie(t *testing.T) {
-	type loginIn struct {
-		User string `form:"user"`
-	}
-	h := newTestApp(t, Config{},
-		POST("/login", func(ctx context.Context, in *loginIn) (*Redirect, error) {
-			if in.User == "" {
-				return nil, rockdelivery.Unauthorized("who are you?")
-			}
-			SetCookie(ctx, &http.Cookie{Name: "session", Value: "s-" + in.User, HttpOnly: true})
-			SetHeader(ctx, "X-User", in.User)
-			if Request(ctx) == nil {
-				return nil, errors.New("no raw request")
-			}
-			return &Redirect{URL: "/home", Code: http.StatusSeeOther}, nil
-		}))
+type LoginParams struct {
+	User string `form:"user"`
+}
 
-	req := httptest.NewRequest(http.MethodPost, "/login", strings.NewReader("user=ann"))
+func TestRedirectAndCookie(t *testing.T) {
+	h := handler(t, New(Config{}, Endpoint{Method: "POST", Path: "/login", Handler: rh.Chain("login",
+		func(c *rh.Ctx[*LoginParams, *Redirect]) error {
+			if c.Params.User == "" {
+				return rh.Unauthorized("who are you?")
+			}
+			SetCookie(c, &http.Cookie{Name: "session", Value: "s-" + c.Params.User, HttpOnly: true})
+			SetHeader(c, "X-User", c.Params.User)
+			*c.Result = Redirect{URL: "/home", Code: http.StatusSeeOther}
+			return nil
+		})}))
+
+	req := httptest.NewRequest("POST", "/login", strings.NewReader("user=ann"))
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	rec := do(h, req)
-	if rec.Code != http.StatusSeeOther || rec.Header().Get("Location") != "/home" {
-		t.Fatalf("status = %d, Location %q, body %s", rec.Code, rec.Header().Get("Location"), rec.Body)
+	if rec.Code != 303 || rec.Header().Get("Location") != "/home" || rec.Header().Get("X-User") != "ann" {
+		t.Fatalf("status %d, headers %v", rec.Code, rec.Header())
 	}
 	if c := rec.Result().Cookies(); len(c) != 1 || c[0].Value != "s-ann" || !c[0].HttpOnly {
-		t.Fatalf("cookies = %v", c)
-	}
-	if rec.Header().Get("X-User") != "ann" {
-		t.Fatalf("X-User = %q", rec.Header().Get("X-User"))
-	}
-
-	req = httptest.NewRequest(http.MethodPost, "/login", strings.NewReader(""))
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	if rec = do(h, req); rec.Code != http.StatusUnauthorized {
-		t.Fatalf("status = %d", rec.Code)
+		t.Fatalf("cookies %v", c)
 	}
 }
 
@@ -291,24 +333,26 @@ func TestHTTPMiddleware(t *testing.T) {
 			next.ServeHTTP(w, r)
 		})
 	}
-	h := newTestApp(t, Config{Middleware: []func(http.Handler) http.Handler{cors}},
-		GET("/ping", func(context.Context, *nothing) (*map[string]string, error) {
-			return &map[string]string{"pong": "ok"}, nil
-		}))
-	rec := do(h, httptest.NewRequest(http.MethodGet, "/ping", nil))
-	if rec.Code != 200 || rec.Header().Get("Access-Control-Allow-Origin") != "*" {
-		t.Fatalf("status = %d, headers %v", rec.Code, rec.Header())
+	h := handler(t, New(Config{Middleware: []func(http.Handler) http.Handler{cors}},
+		Endpoint{Method: "DELETE", Path: "/x/{id}", Handler: rh.Chain("x", func(*rh.Ctx[*IDParams, *Empty]) error { return nil })}))
+	if rec := do(h, httptest.NewRequest("DELETE", "/x/1", nil)); rec.Header().Get("Access-Control-Allow-Origin") != "*" {
+		t.Fatalf("headers %v", rec.Header())
 	}
 }
 
 func TestInitErrors(t *testing.T) {
-	h := func(context.Context, *nothing) (*nothing, error) { return nil, nil }
-	if err := New(Config{}, GET("/a", h)).Init(context.Background()); err == nil {
-		t.Fatal("empty Port: want error")
+	ok := rh.Chain("x", func(*rh.Ctx[*IDParams, *Empty]) error { return nil })
+	cases := map[string]*App{
+		"no port":        New(Config{}, Endpoint{Method: "GET", Path: "/a", Handler: ok}),
+		"no handler":     New(Config{Port: "0"}, Endpoint{Method: "GET", Path: "/a"}),
+		"no method":      New(Config{Port: "0"}, Endpoint{Path: "/a", Handler: ok}),
+		"duplicate":      New(Config{Port: "0"}, Endpoint{Method: "GET", Path: "/a", Handler: ok}, Endpoint{Method: "GET", Path: "/a", Handler: ok}),
+		"nil middleware": New(Config{Port: "0"}, Endpoint{Method: "GET", Path: "/a", Handler: ok}).Use(nil),
 	}
-	err := New(Config{Port: "0"}, GET("/a", h), GET("/a", h)).Init(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "rockhttp:") {
-		t.Fatalf("duplicate route: err = %v", err)
+	for name, a := range cases {
+		if err := a.Init(context.Background()); err == nil {
+			t.Errorf("%s: no error", name)
+		}
 	}
 }
 
@@ -317,11 +361,11 @@ func TestExecAndStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	port := ln.Addr().(*net.TCPAddr).Port
+	port := strconv.Itoa(ln.Addr().(*net.TCPAddr).Port)
 	_ = ln.Close()
 
-	a := New(Config{Port: strconv.Itoa(port), ShutdownTimeout: time.Second},
-		GET("/ping", func(context.Context, *nothing) (*nothing, error) { return &nothing{}, nil }))
+	a := New(Config{Port: port, ShutdownTimeout: time.Second},
+		Endpoint{Method: "GET", Path: "/ping/{id}", Handler: rh.Chain("ping", func(*rh.Ctx[*IDParams, *Empty]) error { return nil })})
 	if err := a.Init(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -329,10 +373,9 @@ func TestExecAndStop(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- a.Exec(ctx) }()
 
-	url := "http://127.0.0.1:" + strconv.Itoa(port) + "/ping"
 	var resp *http.Response
-	for i := 0; i < 50; i++ {
-		if resp, err = http.Get(url); err == nil {
+	for range 50 {
+		if resp, err = http.Get("http://127.0.0.1:" + port + "/ping/1"); err == nil {
 			break
 		}
 		time.Sleep(20 * time.Millisecond)
@@ -341,10 +384,9 @@ func TestExecAndStop(t *testing.T) {
 		t.Fatalf("server did not start: %v", err)
 	}
 	_ = resp.Body.Close()
-	if resp.StatusCode != 200 {
-		t.Fatalf("status = %d", resp.StatusCode)
+	if resp.StatusCode != 204 {
+		t.Fatalf("status %d", resp.StatusCode)
 	}
-
 	cancel()
 	select {
 	case err := <-done:

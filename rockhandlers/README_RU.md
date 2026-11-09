@@ -35,10 +35,18 @@ func Create(c *rockhandlers.Ctx[*CreateParams, *CreateResult]) error {
 var CreateOrder = rockhandlers.Chain("orders.create", auth.Bearer, Create)
 ```
 
+Длинную сигнатуру шага можно сократить псевдонимом типа рядом с моделью — это тот же тип, в рантайме он ничего не стоит:
+
+```go
+type CreateCtx = rockhandlers.Ctx[*CreateParams, *CreateResult]
+
+func Create(c *CreateCtx) error { … }
+```
+
 - `Ctx[P, R]` хранит типизированные `Params` и `Result`. `Params` заполняет транспорт, `Result` создаётся до цепочки, и его заполняют шаги. P и R — указатели на структуры.
 - Шаг, который не вызвал `c.Next()`, завершает цепочку. Ранний успешный выход — например, попадание в кэш — это нормально.
 - Повторный `Next()` возвращает результат первого вызова. `Next()` после последнего шага возвращает nil.
-- Если `Params` реализует `Validate() error`, валидация выполняется перед первым шагом. Простая ошибка из неё становится `Invalid`.
+- Если `Params` реализует `Validate() error`, валидация выполняется после того, как транспорт заполнил `Params`, и перед первым шагом: сначала проверка, потом использование. Простая ошибка из неё становится `Invalid`.
 - `Chain` стирает дженерики. `Route` — обычное значение, поэтому маршруты разных типов лежат в одном слайсе.
 
 ## Переиспользуемые шаги: ограничения вместо приведений
@@ -76,7 +84,7 @@ route = route.With(Log, rockhandlers.Timeout(5*time.Second))
 
 `With` оборачивает маршрут:
 - первый middleware — самый внешний, а каждый следующий вызов `With` оборачивает всё, что добавили раньше. Так же транспорт добавляет свои middleware уровня приложения — через `route.With(...)` при регистрации;
-- порядок выполнения: транспорт → `With` → валидация → шаги;
+- порядок выполнения: middleware транспорта → `With` → разбор запроса (заполнение от транспорта) → валидация → шаги;
 - `c.SetContext(ctx)` заменяет контекст на остаток запроса.
 
 ## Группы
@@ -107,6 +115,7 @@ u := UserKey.MustGet(c)  // паника (→ Internal), если нет шаг�
 - **Конструкторы:** `Invalid`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict`, `Unavailable`.
 - **Детали:** `.WithFields(map)` добавляет ошибки по полям; `.Wrap(err)` — причину, только для логов.
 - **`KindOf(err)`:**
+  - nil → `KindNone`;
   - `*Error` → его вид;
   - `context.Canceled` → `KindCanceled`;
   - `context.DeadlineExceeded` → `KindTimeout`;
@@ -126,18 +135,20 @@ u := UserKey.MustGet(c)  // паника (→ Internal), если нет шаг�
 ## Для транспортов
 
 ```go
-params := route.NewParams()               // новый P
-// заполнить params из запроса
-result, err := route.Serve(ctx, params)   // не паникует; при ошибке result == nil
+result, err := route.Serve(ctx, func(params any) error {
+    return decode(req, params) // заполнить новый P из запроса
+})                             // не паникует; при ошибке result == nil
 // err → протокол по KindOf(err); result (R) → протокол
 ```
+
+Функция заполнения выполняется внутри цепочки — после middleware и перед валидацией. Поэтому middleware видят ошибки разбора, а таймаут покрывает и разбор. Простая ошибка из неё становится `Invalid` с её текстом; чтобы задать вид и сообщение, верните `*Error`.
 
 `ParamsType()` и `ResultType()` позволяют транспорту проверить маршруты на старте — например, отказать типу результата, который он не умеет отдавать.
 
 ## Тестирование
 
 ```go
-res, err := rockhandlers.Run[*CreateParams, *CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1})
+res, err := rockhandlers.Run[*CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1}) // P выводится
 ```
 
 `Run` прогоняет всю цепочку — middleware, валидацию, шаги — без транспорта. Шаги — обычные функции, их можно тестировать и по отдельности.

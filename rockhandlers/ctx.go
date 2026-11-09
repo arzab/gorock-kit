@@ -53,8 +53,8 @@ type Context interface {
 type Middleware func(c Context) error
 
 // Validator is implemented by Params that validate themselves. Validate runs
-// after the middlewares and before the first step; a plain error becomes
-// Invalid.
+// after the middlewares and the transport's fill, before the first step; a
+// plain error becomes Invalid.
 type Validator interface{ Validate() error }
 
 // Ctx is the state of one request. It is a context.Context: pass it to the
@@ -71,6 +71,7 @@ type Ctx[P, R any] struct {
 	lv    map[any]any
 
 	mws   []Middleware
+	fill  func(params any) error // the transport's decoding; may be nil
 	steps []Handler[P, R]
 	cur   int     // index of the running link; -1 before the chain starts
 	ran   []bool  // per link: Next already started it
@@ -97,7 +98,7 @@ func (c *Ctx[P, R]) setLocal(k, v any) {
 	c.lv[k] = v
 }
 
-// links: middlewares, then validation, then steps.
+// links: middlewares, then fill + validation, then steps.
 func (c *Ctx[P, R]) links() int { return len(c.mws) + 1 + len(c.steps) }
 
 // Next runs the next link of the chain and returns its error.
@@ -139,13 +140,23 @@ func (c *Ctx[P, R]) run(i int) (err error) {
 	case i < n:
 		return c.mws[i](c)
 	case i == n:
-		return c.validate()
+		return c.prepare()
 	default:
 		return c.steps[i-n-1](c)
 	}
 }
 
-func (c *Ctx[P, R]) validate() error {
+// prepare fills Params (the transport's decoding) and validates them.
+func (c *Ctx[P, R]) prepare() error {
+	if c.fill != nil {
+		if err := c.fill(c.Params); err != nil {
+			var e *Error
+			if errors.As(err, &e) {
+				return err
+			}
+			return &Error{Kind: KindInvalid, Message: err.Error(), Err: err}
+		}
+	}
 	if v, ok := any(c.Params).(Validator); ok {
 		if err := v.Validate(); err != nil {
 			var e *Error

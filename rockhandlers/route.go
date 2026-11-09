@@ -13,7 +13,7 @@ type Route struct {
 	params reflect.Type
 	result reflect.Type
 	mws    []Middleware // outermost first
-	serve  func(ctx context.Context, name string, mws []Middleware, params any) (any, error)
+	serve  func(ctx context.Context, name string, mws []Middleware, params any, fill func(any) error) (any, error)
 }
 
 // Chain builds a route from steps. P and R must be pointer-to-struct types;
@@ -43,7 +43,10 @@ func Chain[P, R any](name string, steps ...Handler[P, R]) Route {
 	}
 	steps = append([]Handler[P, R](nil), steps...)
 
-	serve := func(ctx context.Context, name string, mws []Middleware, params any) (any, error) {
+	serve := func(ctx context.Context, name string, mws []Middleware, params any, fill func(any) error) (any, error) {
+		if params == nil {
+			params = reflect.New(pt.Elem()).Interface()
+		}
 		p, ok := params.(P)
 		if !ok || reflect.ValueOf(p).IsNil() {
 			return nil, &Error{Kind: KindInternal, Err: fmt.Errorf("rockhandlers: route %q: params must be a non-nil %s, got %T", name, pt, params)}
@@ -54,6 +57,7 @@ func Chain[P, R any](name string, steps ...Handler[P, R]) Route {
 			ctx:    ctx,
 			route:  name,
 			mws:    mws,
+			fill:   fill,
 			steps:  steps,
 			cur:    -1,
 		}
@@ -90,13 +94,6 @@ func (r Route) ParamsType() reflect.Type { return r.params }
 // ResultType returns R.
 func (r Route) ResultType() reflect.Type { return r.result }
 
-// NewParams returns a new P (a pointer to a zero struct) for the transport
-// to fill.
-func (r Route) NewParams() any {
-	r.mustBuilt()
-	return reflect.New(r.params.Elem()).Interface()
-}
-
 // With returns a copy of r with extra middlewares around it. The first one
 // is the outermost, and each With call wraps everything added before:
 // route.With(A).With(B) runs B → A → steps.
@@ -112,16 +109,21 @@ func (r Route) With(mws ...Middleware) Route {
 	return r
 }
 
-// Serve runs the chain with params (a P from NewParams, filled by the
-// transport).
+// Serve runs the chain for one request. fill is the transport's decoding:
+// it gets a new P (a pointer to a zero struct) and fills it from the request.
+// It runs inside the chain — after the middlewares, before validation — so
+// middlewares see decoding errors and timeouts cover decoding. A plain error
+// from fill becomes Invalid with its text; return an *Error to control the
+// kind and the message. fill may be nil.
 //
-// It never panics. On error the result is nil — a partly filled Result does
-// not leak; classify the error with KindOf. On success the result is the R.
-func (r Route) Serve(ctx context.Context, params any) (any, error) {
+// Serve never panics. On error the result is nil — a partly filled Result
+// does not leak; classify the error with KindOf. On success the result is
+// the R.
+func (r Route) Serve(ctx context.Context, fill func(params any) error) (any, error) {
 	if r.serve == nil {
 		return nil, &Error{Kind: KindInternal, Err: fmt.Errorf("rockhandlers: Serve on a Route not built by Chain")}
 	}
-	return r.serve(ctx, r.name, r.mws, params)
+	return r.serve(ctx, r.name, r.mws, nil, fill)
 }
 
 func (r Route) mustBuilt() {
@@ -130,11 +132,11 @@ func (r Route) mustBuilt() {
 	}
 }
 
-// Run serves the route with typed params and result — for tests and for
-// calling a route from code.
+// Run serves the route with ready params — for tests and for calling a route
+// from code. P is inferred from params:
 //
-//	res, err := rockhandlers.Run[*CreateParams, *CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1})
-func Run[P, R any](ctx context.Context, r Route, params P) (R, error) {
+//	res, err := rockhandlers.Run[*CreateResult](ctx, CreateOrder, &CreateParams{Qty: 1})
+func Run[R, P any](ctx context.Context, r Route, params P) (R, error) {
 	var zero R
 	if r.serve == nil {
 		return zero, fmt.Errorf("rockhandlers: Run on a Route not built by Chain")
@@ -142,7 +144,10 @@ func Run[P, R any](ctx context.Context, r Route, params P) (R, error) {
 	if pt, rt := reflect.TypeFor[P](), reflect.TypeFor[R](); pt != r.params || rt != r.result {
 		return zero, fmt.Errorf("rockhandlers: Run[%s, %s] on route %q of [%s, %s]", pt, rt, r.name, r.params, r.result)
 	}
-	res, err := r.Serve(ctx, params)
+	if reflect.ValueOf(params).IsNil() {
+		return zero, fmt.Errorf("rockhandlers: Run on route %q: nil params", r.name)
+	}
+	res, err := r.serve(ctx, r.name, r.mws, params, nil)
 	if err != nil {
 		return zero, err
 	}

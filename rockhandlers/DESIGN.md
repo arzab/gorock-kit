@@ -260,7 +260,7 @@ res, err := rockhandlers.Run[*CreateOrderParams, *CreateOrderResult](ctx, Create
 
 # План работ
 
-1. **Переименование.** `rockdelivery` → `rockhandlers`: каталог, `go.mod`, `go.work`, матрица CI, `replace` в `rockhttp`.
+1. ✅ **Переименование.** `rockdelivery` → `rockhandlers` (rockdelivery удалён): каталог, `go.mod`, `go.work`, матрица CI, `replace` в `rockhttp`.
 2. **Ядро `rockhandlers`**:
    - файлы:
      - `ctx.go` — Ctx, Context, Next;
