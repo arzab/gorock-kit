@@ -427,7 +427,12 @@ rockfiber.HandlerInitInCtx[MyStruct]("my-key")
 
 // Получить его в следующем хендлере (типобезопасно)
 val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
+
+// Trace ID (при UseTraceId) из любого контекста, производного от c.UserContext()
+id := rockfiber.TraceIdFromContext(c.UserContext())
 ```
+
+Передавайте `c.UserContext()` в сервисы, чтобы они могли прочитать trace ID — например, добавить его в логгер через `rocklog.WithContext`.
 
 ## Восстановление после паники
 

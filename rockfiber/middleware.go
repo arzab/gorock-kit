@@ -62,6 +62,8 @@ func MetricsHandler(cfg *monitor.Config) fiber.Handler {
 
 // TraceIdMiddleware generates a new X-Trace-Id UUID for each request, or propagates
 // an existing one if already present in the incoming request headers.
+// The ID is stored in the response header, in c.Locals(TraceIdKey) and in
+// c.UserContext() (read it with TraceIdFromContext).
 // Incoming values are sanitised: values longer than 64 chars or containing
 // control characters (e.g. newlines) are rejected and a fresh UUID is generated instead.
 func TraceIdMiddleware() fiber.Handler {
@@ -72,8 +74,22 @@ func TraceIdMiddleware() fiber.Handler {
 		}
 		c.Set(TraceIdKey, traceId)
 		c.Locals(TraceIdKey, traceId)
+		c.SetUserContext(context.WithValue(c.UserContext(), traceIdCtxKey{}, traceId))
 		return c.Next()
 	}
+}
+
+type traceIdCtxKey struct{}
+
+// TraceIdFromContext returns the trace ID set by TraceIdMiddleware, or "" if
+// there is none. Use it with c.UserContext() or any context derived from it —
+// for example to attach the trace ID to a logger:
+//
+//	ctx := c.UserContext()
+//	ctx = rocklog.WithContext(ctx, rocklog.Str("trace_id", rockfiber.TraceIdFromContext(ctx)))
+func TraceIdFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(traceIdCtxKey{}).(string)
+	return id
 }
 
 // isValidTraceId checks that a client-supplied trace ID is safe to log and propagate.

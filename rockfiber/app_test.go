@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/cors"
@@ -21,12 +22,11 @@ func newTestApp(t *testing.T, cfg Config, endpoints ...FiberEndpoint) *FiberApp 
 	if cfg.Port == "" {
 		cfg.Port = "0"
 	}
-	a := New(cfg)
-	a.SetEndpoints(endpoints)
+	a := New(cfg, endpoints...)
 	if err := a.Init(context.Background()); err != nil {
 		t.Fatalf("Init: %v", err)
 	}
-	a.setupEndpoints()
+	a.setupEndpoints(a.fiber)
 	return a
 }
 
@@ -144,5 +144,27 @@ func TestCorsExplicitConfig(t *testing.T) {
 	resp, _ := do(t, a, req)
 	if v := resp.Header.Get("Access-Control-Allow-Origin"); v != "https://app.example" {
 		t.Fatalf("got Access-Control-Allow-Origin=%q, want https://app.example", v)
+	}
+}
+
+func TestTraceIdInUserContext(t *testing.T) {
+	a := newTestApp(t, Config{UseTraceId: true}, GET("/t", func(c *fiber.Ctx) error {
+		return c.SendString(TraceIdFromContext(c.UserContext()))
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/t", nil)
+	req.Header.Set(TraceIdKey, "abc-123")
+	resp, body := do(t, a, req)
+	if body != "abc-123" || resp.Header.Get(TraceIdKey) != "abc-123" {
+		t.Fatalf("body=%q header=%q", body, resp.Header.Get(TraceIdKey))
+	}
+
+	// Survives RequestTimeoutMiddleware, which wraps the user context.
+	a = newTestApp(t, Config{UseTraceId: true, RequestTimeout: time.Second}, GET("/t", func(c *fiber.Ctx) error {
+		return c.SendString(TraceIdFromContext(c.UserContext()))
+	}))
+	_, body = do(t, a, httptest.NewRequest(http.MethodGet, "/t", nil))
+	if len(body) != 36 { // generated UUID
+		t.Fatalf("expected generated trace id, got %q", body)
 	}
 }

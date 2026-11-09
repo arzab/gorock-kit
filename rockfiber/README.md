@@ -430,7 +430,12 @@ rockfiber.HandlerInitInCtx[MyStruct]("my-key")
 
 // Retrieve it downstream (type-safe)
 val, err := rockfiber.GetFromContext[MyStruct](ctx, "my-key")
+
+// Trace ID (with UseTraceId) from any context derived from c.UserContext()
+id := rockfiber.TraceIdFromContext(c.UserContext())
 ```
+
+Pass `c.UserContext()` to your services so they can read the trace ID — e.g. to attach it to a logger with `rocklog.WithContext`.
 
 ## Panic Recovery
 
