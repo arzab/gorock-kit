@@ -96,6 +96,17 @@ go get github.com/arzab/gorock-kit/rockcron
 go get github.com/arzab/gorock-kit/rocktelebot
 ```
 
+## ИИ-агенты
+
+Плагин для Claude Code учит агента структуре GOROCK и этому API (skill `gorock:service`: создать проект, добавить endpoints, сервисы, события, задачи, apps — и проверить сборку):
+
+```sh
+claude plugin marketplace add arzab/gorock
+claude plugin install gorock@gorock
+```
+
+Для Codex, Cursor и других агентов положите [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) в корень проекта. Подробнее: [arzab.github.io/gorock/ai](https://arzab.github.io/gorock/ai/).
+
 ## Локальная разработка
 
 `go.work` в корне связывает все модули (и `examples/fullapp`). Корневого модуля нет, поэтому `go build ./...` из корня ничего не находит — используйте скрипт проверки, он проходит по модулям:

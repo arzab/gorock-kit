@@ -96,6 +96,17 @@ go get github.com/arzab/gorock-kit/rockcron
 go get github.com/arzab/gorock-kit/rocktelebot
 ```
 
+## AI coding agents
+
+A Claude Code plugin teaches the agent the GOROCK layout and this API (skill `gorock:service`: scaffold a project, add endpoints, services, events, jobs, apps — and verify the build):
+
+```sh
+claude plugin marketplace add arzab/gorock
+claude plugin install gorock@gorock
+```
+
+For Codex, Cursor and other agents, put [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) in your project root. Details: [arzab.github.io/gorock/ai](https://arzab.github.io/gorock/ai/).
+
 ## Local development
 
 `go.work` at the repo root wires all modules (and `examples/fullapp`) together. There is no root module, so `go build ./...` from the root matches nothing — use the check script, which loops over modules:
