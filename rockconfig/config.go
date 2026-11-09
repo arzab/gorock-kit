@@ -11,16 +11,18 @@ import (
 // Supported formats: .json, .yaml, .yml (extensible via RegisterDecoder).
 //
 // Field mapping:
+//
 //   - By default, struct fields are mapped by their snake_case name.
+//
 //   - Use the config tag to customise behaviour:
 //
-//	type Config struct {
-//	    Host    string `config:"host"`             // explicit name
-//	    Port    int    `config:",default=8080"`     // snake_case + default
-//	    Debug   bool   `config:",omitempty"`        // snake_case, not required
-//	    Secret  string `config:",env=APP_SECRET"`   // read from $APP_SECRET
-//	    Token   string `config:"-"`                 // ignored
-//	}
+//     type Config struct {
+//     Host    string `config:"host"`             // explicit name
+//     Port    int    `config:",default=8080"`     // snake_case + default
+//     Debug   bool   `config:",omitempty"`        // snake_case, not required
+//     Secret  string `config:",env=APP_SECRET"`   // read from $APP_SECRET
+//     Token   string `config:"-"`                 // ignored
+//     }
 //
 // $ENV_VAR references in the config file are expanded automatically.
 // Returns an error listing all missing required fields if any are empty after loading.

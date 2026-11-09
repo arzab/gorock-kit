@@ -22,7 +22,7 @@ type fiberEndpoint struct {
 	handlers []fiber.Handler
 }
 
-func (e *fiberEndpoint) GetPath() string             { return e.path }
+func (e *fiberEndpoint) GetPath() string              { return e.path }
 func (e *fiberEndpoint) GetMethod() string            { return e.method }
 func (e *fiberEndpoint) GetHandlers() []fiber.Handler { return e.handlers }
 

@@ -386,7 +386,7 @@ func TestShutdownTimeoutCoversStop(t *testing.T) {
 	release := make(chan struct{})
 	defer close(release)
 	b.stopFn = func() []error { <-release; return nil }
-	e := NewEngine().WithShutdownTimeout(50 * time.Millisecond).MustRegister("db", a).MustRegister("bot", b)
+	e := NewEngine().WithShutdownTimeout(50*time.Millisecond).MustRegister("db", a).MustRegister("bot", b)
 	cancel, res := run(t, e)
 	a.waitRunning(t)
 	b.waitRunning(t)

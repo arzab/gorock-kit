@@ -80,9 +80,9 @@ func Every(name string, interval time.Duration, handlers ...Handler) *IntervalJo
 	return &IntervalJob{name: name, interval: interval, handlers: handlers}
 }
 
-func (j *IntervalJob) Schedule() string                { return "@every " + j.interval.String() }
-func (j *IntervalJob) JobName() string                 { return j.name }
-func (j *IntervalJob) Run(ctx context.Context) error   { return runChain(ctx, j.handlers) }
+func (j *IntervalJob) Schedule() string              { return "@every " + j.interval.String() }
+func (j *IntervalJob) JobName() string               { return j.name }
+func (j *IntervalJob) Run(ctx context.Context) error { return runChain(ctx, j.handlers) }
 
 // CronJob runs its handler chain on a 5-field cron expression.
 // Create with Cron.
@@ -107,6 +107,6 @@ func Cron(name, expr string, handlers ...Handler) *CronJob {
 	return &CronJob{name: name, expr: expr, handlers: handlers}
 }
 
-func (j *CronJob) Schedule() string                { return j.expr }
-func (j *CronJob) JobName() string                 { return j.name }
-func (j *CronJob) Run(ctx context.Context) error   { return runChain(ctx, j.handlers) }
+func (j *CronJob) Schedule() string              { return j.expr }
+func (j *CronJob) JobName() string               { return j.name }
+func (j *CronJob) Run(ctx context.Context) error { return runChain(ctx, j.handlers) }

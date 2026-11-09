@@ -8,3 +8,7 @@ linters:
     - staticcheck
     - unused
     - ineffassign
+
+formatters:
+  enable:
+    - gofmt
