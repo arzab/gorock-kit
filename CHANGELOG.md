@@ -4,9 +4,17 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
+### Added
+
+- **rockservices** — the services layer: `Catalog` with `Add(c, ctor, cfg)`, `Get[T](name)`, `Init`, `Stop` (reverse order, timeout), a default catalog, `New()` and `SetDefault` for tests. A service implements `Name() string`, `Init(ctx) error`, `Stop() error`.
+
+### Removed
+
+- **rockengine:** `Resource`, `RegisterResource`, `MustRegisterResource`. The engine runs apps only; services are started before it and stopped after it by `rockservices` in `cmd/main`.
+
 ### ⚠️ Changes that need action
 
-The kit is now only its core: **`rockengine`** and **`rockconfig`**. The other modules were moved, as-is, to the sibling repository [gorock-catalog](https://github.com/arzab/gorock-catalog) (module paths `github.com/arzab/gorock-catalog/<module>`), where they will be reshaped into a catalog of components you copy into your project, with an HTTP app on `net/http` instead of Fiber.
+The kit is now only its core: **`rockengine`** and **`rockconfig`**. The other modules were moved, as-is, to the sibling repository `gorock-catalog` (a separate repository, not published yet) (module paths `github.com/arzab/gorock-catalog/<module>`), where they will be reshaped into a catalog of components you copy into your project, with an HTTP app on `net/http` instead of Fiber.
 
 | Removed module | Where |
 |---|---|

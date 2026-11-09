@@ -30,12 +30,6 @@ func Register(name string, app App, policy ...RestartPolicy) {
 	defaultEngine.MustRegister(name, app, policy...)
 }
 
-// RegisterResource adds a named Resource to the default engine.
-// Panics if the name is already registered or the engine is running.
-func RegisterResource(name string, res Resource) {
-	defaultEngine.MustRegisterResource(name, res)
-}
-
 // Run starts the default engine.
 func Run() error {
 	return defaultEngine.Run()

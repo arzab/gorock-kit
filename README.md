@@ -4,27 +4,33 @@ The core of [GOROCK](https://arzab.github.io/gorock/) — the structural pieces 
 
 | Module | Description |
 |---|---|
-| [rockengine](./rockengine) | Lifecycle: resources first, apps in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
+| [rockengine](./rockengine) | Apps lifecycle: start in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
 | [rockconfig](./rockconfig) | One config file (YAML/JSON) → typed `Configs`: snake_case mapping, `${ENV:-default}`, defaults, required fields and unknown-key checks |
+| [rockservices](./rockservices) | Services layer: one catalog that creates, stores by name, hands out, initialises and stops the services of `pkg/services` |
 
-Go 1.26+. `rockengine` uses only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
+Go 1.26+. `rockengine` and `rockservices` use only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
 
-HTTP server, PostgreSQL/Redis services, logger, event bus, scheduler and Telegram bot were moved out of the kit to [gorock-catalog](https://github.com/arzab/gorock-catalog). Their last versions here, `v0.2.0`, stay available.
+HTTP server, PostgreSQL/Redis services, logger, event bus, scheduler and Telegram bot were moved out of the kit to `gorock-catalog` (a separate repository, not published yet). Their last versions here, `v0.2.0`, stay available.
 
-## Contracts
+## How they fit
 
-Everything the engine runs is one of two things:
+```
+cmd/main:  rockconfig → rockservices.Init → rockengine.Run (apps) → rockservices.Stop
+```
+
+Services are a layer of their own: they start before the apps and stop after them. The engine runs only apps:
 
 ```go
-// App — something that works: an HTTP server, a consumer, a scheduler.
+// an App: HTTP server, consumer, scheduler, bot
 type App interface {
     Init(ctx context.Context) error
     Exec(ctx context.Context) error // return when ctx is cancelled
     Stop() []error
 }
 
-// Resource — something apps use: a DB pool, a cache client.
-type Resource interface {
+// a service in pkg/services: DB, cache, external API
+type Service interface {
+    Name() string
     Init(ctx context.Context) error
     Stop() error
 }
@@ -38,19 +44,21 @@ type Configs struct {
     Apps     apps.Configs
 }
 
-func main() {
+func Exec(ctx context.Context) error {
     cfg, err := rockconfig.InitFromFile[Configs]("./configs/configs.yaml")
     if err != nil {
-        log.Fatal(err)
+        return err
     }
+
+    services.Register(rockservices.Default(), cfg.Services)
+    if err := rockservices.Init(ctx); err != nil {
+        return err
+    }
+    defer rockservices.Stop()
 
     engine := rockengine.NewEngine()
-    services.Register(engine, cfg.Services) // resources: init first, stop last
-    apps.Register(engine, cfg.Apps)         // apps: stop one by one in reverse order
-
-    if err := engine.Run(); err != nil { // blocks until SIGINT/SIGTERM or an app fails
-        log.Fatal(err)
-    }
+    apps.Register(engine, cfg.Apps)
+    return engine.Run() // blocks until SIGINT/SIGTERM or an app fails
 }
 ```
 
@@ -60,14 +68,11 @@ type Configs struct {
     Repository repository.Configs
 }
 
-var repo repository.Service
-
-func Repository() repository.Service { return repo }
-
-func Register(e *rockengine.Engine, cfg Configs) {
-    repo = repository.NewService(cfg.Repository) // implements rockengine.Resource
-    e.MustRegisterResource("repository", repo)
+func Register(c *rockservices.Catalog, cfg Configs) {
+    rockservices.Add(c, repository.NewService, cfg.Repository)
 }
+
+// anywhere: rockservices.Get[repository.Service](repository.Name)
 ```
 
 Where each piece of code goes and why: [GOROCK architecture](https://arzab.github.io/gorock/architecture/).
@@ -77,6 +82,7 @@ Where each piece of code goes and why: [GOROCK architecture](https://arzab.githu
 ```sh
 go get github.com/arzab/gorock-kit/rockengine
 go get github.com/arzab/gorock-kit/rockconfig
+go get github.com/arzab/gorock-kit/rockservices
 ```
 
 ## AI coding agents
@@ -92,7 +98,7 @@ For Codex, Cursor and other agents, put [AGENTS.md](https://github.com/arzab/gor
 
 ## Local development
 
-`go.work` at the repo root wires both modules. There is no root module, so `go build ./...` from the root matches nothing — use the check script:
+`go.work` at the repo root wires the modules. There is no root module, so `go build ./...` from the root matches nothing — use the check script:
 
 ```sh
 bash scripts/check.sh all                # build + vet + test, every module

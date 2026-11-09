@@ -4,27 +4,33 @@
 
 | Модуль | Описание |
 |---|---|
-| [rockengine](./rockengine) | Жизненный цикл: сначала ресурсы, затем apps в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
+| [rockengine](./rockengine) | Жизненный цикл apps: старт в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
+| [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по имени, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
 
-Go 1.26+. `rockengine` использует только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
+Go 1.26+. `rockengine` и `rockservices` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
 
-HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина событий, планировщик и Telegram-бот вынесены из kit в [gorock-catalog](https://github.com/arzab/gorock-catalog). Их последние версии здесь, `v0.2.0`, остаются доступны.
+HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина событий, планировщик и Telegram-бот вынесены из kit в `gorock-catalog` (отдельный репозиторий, пока не опубликован). Их последние версии здесь, `v0.2.0`, остаются доступны.
 
-## Контракты
+## Как они связаны
 
-Всё, что запускает движок, — одно из двух:
+```
+cmd/main:  rockconfig → rockservices.Init → rockengine.Run (apps) → rockservices.Stop
+```
+
+Сервисы — отдельный слой: стартуют до apps и останавливаются после них. Движок запускает только apps:
 
 ```go
-// App — то, что работает: HTTP-сервер, consumer, планировщик.
+// App: HTTP-сервер, consumer, планировщик, бот
 type App interface {
     Init(ctx context.Context) error
     Exec(ctx context.Context) error // вернуться при отмене ctx
     Stop() []error
 }
 
-// Resource — то, чем пользуются apps: пул БД, клиент кэша.
-type Resource interface {
+// сервис в pkg/services: БД, кэш, внешний API
+type Service interface {
+    Name() string
     Init(ctx context.Context) error
     Stop() error
 }
@@ -38,19 +44,21 @@ type Configs struct {
     Apps     apps.Configs
 }
 
-func main() {
+func Exec(ctx context.Context) error {
     cfg, err := rockconfig.InitFromFile[Configs]("./configs/configs.yaml")
     if err != nil {
-        log.Fatal(err)
+        return err
     }
+
+    services.Register(rockservices.Default(), cfg.Services)
+    if err := rockservices.Init(ctx); err != nil {
+        return err
+    }
+    defer rockservices.Stop()
 
     engine := rockengine.NewEngine()
-    services.Register(engine, cfg.Services) // ресурсы: init первыми, stop последними
-    apps.Register(engine, cfg.Apps)         // apps: останавливаются по одному в обратном порядке
-
-    if err := engine.Run(); err != nil { // блокирует до SIGINT/SIGTERM или падения App
-        log.Fatal(err)
-    }
+    apps.Register(engine, cfg.Apps)
+    return engine.Run() // блокирует до SIGINT/SIGTERM или падения App
 }
 ```
 
@@ -60,14 +68,11 @@ type Configs struct {
     Repository repository.Configs
 }
 
-var repo repository.Service
-
-func Repository() repository.Service { return repo }
-
-func Register(e *rockengine.Engine, cfg Configs) {
-    repo = repository.NewService(cfg.Repository) // реализует rockengine.Resource
-    e.MustRegisterResource("repository", repo)
+func Register(c *rockservices.Catalog, cfg Configs) {
+    rockservices.Add(c, repository.NewService, cfg.Repository)
 }
+
+// где угодно: rockservices.Get[repository.Service](repository.Name)
 ```
 
 Куда класть код и почему — [архитектура GOROCK](https://arzab.github.io/gorock/architecture/).
@@ -77,6 +82,7 @@ func Register(e *rockengine.Engine, cfg Configs) {
 ```sh
 go get github.com/arzab/gorock-kit/rockengine
 go get github.com/arzab/gorock-kit/rockconfig
+go get github.com/arzab/gorock-kit/rockservices
 ```
 
 ## ИИ-агенты
@@ -92,7 +98,7 @@ claude plugin install gorock@gorock
 
 ## Локальная разработка
 
-`go.work` в корне связывает оба модуля. Корневого модуля нет, поэтому `go build ./...` из корня ничего не находит — используйте скрипт проверки:
+`go.work` в корне связывает модули. Корневого модуля нет, поэтому `go build ./...` из корня ничего не находит — используйте скрипт проверки:
 
 ```sh
 bash scripts/check.sh all                # build + vet + test, все модули

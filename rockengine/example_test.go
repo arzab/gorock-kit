@@ -33,13 +33,7 @@ func (a *WorkerApp) Stop() []error {
 	return nil
 }
 
-type Pool struct{}
-
-func (Pool) Init(context.Context) error { return nil }
-func (Pool) Stop() error                { return nil }
-
 func Example() {
-	rockengine.RegisterResource("db", Pool{})
 	rockengine.Register("worker", &WorkerApp{}, rockengine.RestartPolicy{
 		MaxRetries: -1,
 		Delay:      2 * time.Second,
@@ -56,7 +50,6 @@ func ExampleNewEngine() {
 		WithStopOnFatal(false).
 		WithFatalHandler(func(name string, err error) { log.Printf("app %s is dead: %v", name, err) })
 
-	engine.MustRegisterResource("db", Pool{})
 	engine.MustRegister("worker", &WorkerApp{}, rockengine.RestartPolicy{MaxRetries: 3, Delay: time.Second})
 
 	if err := engine.Run(); err != nil {

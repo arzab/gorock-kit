@@ -124,32 +124,6 @@ if err := engine.Run(); err != nil {
 }
 ```
 
-## Ресурсы
-
-Зависимости без собственного цикла работы — пулы БД, клиенты кэша — регистрируются как **ресурсы**:
-
-```go
-type Resource interface {
-    Init(ctx context.Context) error
-    Stop() error
-}
-```
-
-```go
-repo := repository.NewService(cfg.Repository)   // your pkg/services/repository
-cache := cache.NewService(cfg.Cache)
-
-rockengine.RegisterResource("repository", repo)
-rockengine.RegisterResource("cache", cache)
-rockengine.Register("http", server)
-```
-
-- Ресурсы инициализируются **до** всех apps, в порядке регистрации. Ошибка `Init` останавливает старт и закрывает уже инициализированные ресурсы.
-- Ресурсы останавливаются **после** остановки всех apps, в обратном порядке — HTTP-сервер дообрабатывает запросы до того, как закроется пул, который они используют.
-- `Stop` ресурсов покрывается таймаутом остановки; ошибки возвращаются из `Run`.
-- Ресурсы не перезапускаются и не отображаются в `AppStatuses`.
-- Любой GOROCK-сервис (`Init(ctx) error` / `Stop() error`) — это `Resource`; готовые сервисы PostgreSQL и Redis лежат в [gorock-catalog](https://github.com/arzab/gorock-catalog).
-
 ## Оркестрирование
 
 Отдельными apps можно управлять во время работы движка, не затрагивая остальные:
@@ -198,7 +172,6 @@ for _, info := range rockengine.AppStatuses() {
 | `SetShutdownTimeout(d)`                           | Таймаут остановки (по умолчанию 30s)       |
 | `SetFatalHandler(fn)`                             | Обработчик фатального падения app          |
 | `SetStopOnFatal(bool)`                            | Останавливать движок при падении app (по умолчанию `true`) |
-| `RegisterResource(name, res)`                     | Зарегистрировать ресурс (init первым, stop последним) |
 
 ### Методы Engine
 
@@ -210,7 +183,6 @@ for _, info := range rockengine.AppStatuses() {
 | `WithShutdownTimeout(d)`      | Задать таймаут остановки        |
 | `WithFatalHandler(fn)`        | Задать обработчик фатальных ошибок |
 | `WithStopOnFatal(bool)`       | Останавливаться при падении app (по умолчанию `true`) |
-| `RegisterResource` / `MustRegisterResource` | Зарегистрировать ресурс |
 
 ## Контракт остановки
 
