@@ -160,6 +160,23 @@ db.Info("query executed", rocklog.Dur("took", d))
 
 > Calling `Named` again on a named logger overwrites the previous name.
 
+### Context — request-scoped loggers
+
+Carry a logger with request fields through `context.Context` instead of passing it explicitly:
+
+```go
+// in middleware
+ctx = rocklog.WithContext(ctx, rocklog.Str("trace_id", traceId))
+
+// anywhere below
+rocklog.FromContext(ctx).Info("user created", rocklog.Str("id", id))
+// → level=info trace_id=... id=... msg="user created"
+```
+
+- `WithContext` adds fields to the logger already in `ctx` (or to the default logger).
+- `ContextWithLogger(ctx, l)` stores a specific logger.
+- `FromContext` never returns nil — without a stored logger it returns the default one.
+
 ## Level Checking
 
 For expensive log-message construction, check whether the level is active first:
@@ -208,7 +225,9 @@ Loggers created with `New` and loggers returned by `With` / `Named` always repor
 
 ## Fatal Behaviour
 
-`Fatal` logs the message and then calls `os.Exit(1)`. Deferred functions are **not** executed. Use it only for truly unrecoverable startup failures.
+`Fatal` logs the message and then calls `os.Exit(1)`. Deferred functions are **not** executed. Use it only for truly unrecoverable startup failures, before the engine runs.
+
+> **With rockengine:** never call `Fatal` from inside an app — it skips graceful shutdown of every other app (open requests are cut, queued events are lost). Return an error from `Exec` instead and let the engine's restart policy / `StopOnFatal` handle it.
 
 ## Limitations
 
