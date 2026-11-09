@@ -4,5 +4,7 @@ use (
 	./rockconfig
 	./rockdelivery
 	./rockengine
+	./rockhandlers
+	./rockhttp
 	./rockservices
 )

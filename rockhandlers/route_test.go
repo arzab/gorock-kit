@@ -1,0 +1,339 @@
+package rockhandlers_test
+
+import (
+	"context"
+	"errors"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+
+	rh "github.com/arzab/gorock-kit/rockhandlers"
+)
+
+// --- a reusable step with a constraint, and a model that satisfies it by embedding ---
+
+type TokenParams interface{ BearerToken() string }
+
+type BearerAuth struct {
+	Authorization string `header:"Authorization"`
+}
+
+func (a *BearerAuth) BearerToken() string { return strings.TrimPrefix(a.Authorization, "Bearer ") }
+
+type User struct{ Name string }
+
+var UserKey = rh.NewLocal[*User]("user")
+
+func Bearer[P TokenParams, R any](c *rh.Ctx[P, R]) error {
+	tok := c.Params.BearerToken()
+	if tok == "" {
+		return rh.Unauthorized("token required")
+	}
+	UserKey.Set(c, &User{Name: tok})
+	return c.Next()
+}
+
+// --- models and a business step ---
+
+type CreateParams struct {
+	BearerAuth
+	Item string
+	Qty  int
+}
+
+func (p *CreateParams) Validate() error {
+	if p.Qty <= 0 {
+		return errors.New("qty must be > 0")
+	}
+	return nil
+}
+
+type CreateResult struct {
+	ID    string
+	Owner string
+}
+
+func create(c *rh.Ctx[*CreateParams, *CreateResult]) error {
+	c.Result.ID = c.Params.Item + "-1"
+	c.Result.Owner = UserKey.MustGet(c).Name
+	return nil
+}
+
+// --- a group as a plain generic function ---
+
+func Secured[P TokenParams, R any](name string, steps ...rh.Handler[P, R]) rh.Route {
+	return rh.Chain(name, rh.Prepend(steps, Bearer[P, R])...)
+}
+
+func params(token string, qty int) *CreateParams {
+	return &CreateParams{BearerAuth: BearerAuth{Authorization: "Bearer " + token}, Item: "tea", Qty: qty}
+}
+
+func TestChainInfersGenericSteps(t *testing.T) {
+	route := rh.Chain("orders.create", Bearer, create) // Bearer instantiated from create's types
+	res, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("ann", 1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.ID != "tea-1" || res.Owner != "ann" {
+		t.Fatalf("got %+v", res)
+	}
+}
+
+func TestGroupFunction(t *testing.T) {
+	route := Secured("orders.create", create)
+	if _, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("", 1)); rh.KindOf(err) != rh.KindUnauthorized {
+		t.Fatalf("err = %v", err)
+	}
+	res, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("bob", 1))
+	if err != nil || res.Owner != "bob" {
+		t.Fatalf("res = %+v, err = %v", res, err)
+	}
+}
+
+func TestValidation(t *testing.T) {
+	route := rh.Chain("orders.create", Bearer, create)
+	_, err := rh.Run[*CreateParams, *CreateResult](context.Background(), route, params("ann", 0))
+	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "qty must be > 0" {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// --- order, early exit, repeated Next ---
+
+type P struct{ N int }
+type R struct{ Log []string }
+
+func rec(name string) rh.Handler[*P, *R] {
+	return func(c *rh.Ctx[*P, *R]) error {
+		c.Result.Log = append(c.Result.Log, name)
+		return c.Next()
+	}
+}
+
+func mw(log *[]string, name string) rh.Middleware {
+	return func(c rh.Context) error {
+		*log = append(*log, name+">")
+		err := c.Next()
+		*log = append(*log, "<"+name)
+		return err
+	}
+}
+
+func TestOrder(t *testing.T) {
+	var log []string
+	route := rh.Chain("r", rec("s1"), rec("s2")).With(mw(&log, "a"), mw(&log, "b")).With(mw(&log, "transport"))
+	res, err := rh.Run[*P, *R](context.Background(), route, &P{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(log, " "); got != "transport> a> b> <b <a <transport" {
+		t.Fatalf("middlewares: %s", got)
+	}
+	if got := strings.Join(res.Log, " "); got != "s1 s2" {
+		t.Fatalf("steps: %s", got)
+	}
+}
+
+func TestEarlyExitAndRepeatedNext(t *testing.T) {
+	calls := 0
+	cache := func(c *rh.Ctx[*P, *R]) error {
+		if c.Params.N == 1 {
+			c.Result.Log = []string{"cached"}
+			return nil // no Next: chain ends successfully
+		}
+		err1 := c.Next()
+		err2 := c.Next() // no-op, same result
+		if !errors.Is(err2, err1) && err1 != err2 {
+			t.Errorf("repeated Next: %v vs %v", err1, err2)
+		}
+		return err1
+	}
+	count := func(c *rh.Ctx[*P, *R]) error { calls++; return c.Next() }
+	route := rh.Chain("r", cache, count)
+
+	res, err := rh.Run[*P, *R](context.Background(), route, &P{N: 1})
+	if err != nil || res.Log[0] != "cached" || calls != 0 {
+		t.Fatalf("early exit: res %+v, err %v, calls %d", res, err, calls)
+	}
+	if _, err := rh.Run[*P, *R](context.Background(), route, &P{N: 2}); err != nil || calls != 1 {
+		t.Fatalf("repeated Next: err %v, calls %d", err, calls)
+	}
+}
+
+// --- errors, panics, no leak ---
+
+func TestErrorDropsResult(t *testing.T) {
+	route := rh.Chain("r", func(c *rh.Ctx[*P, *R]) error {
+		c.Result.Log = []string{"partial"}
+		return rh.Conflict("duplicate")
+	})
+	res, err := route.Serve(context.Background(), &P{})
+	if res != nil || rh.KindOf(err) != rh.KindConflict {
+		t.Fatalf("res %v, err %v", res, err)
+	}
+}
+
+func TestPanicBecomesInternalAndMiddlewareSeesIt(t *testing.T) {
+	var seen error
+	catch := func(c rh.Context) error { seen = c.Next(); return seen }
+	route := rh.Chain("r", func(*rh.Ctx[*P, *R]) error { panic("boom") }).With(catch)
+
+	_, err := route.Serve(context.Background(), &P{})
+	var pe *rh.PanicError
+	if rh.KindOf(err) != rh.KindInternal || !errors.As(err, &pe) || pe.Value != "boom" || len(pe.Stack) == 0 {
+		t.Fatalf("err = %v", err)
+	}
+	if seen == nil {
+		t.Fatal("middleware did not see the panic as an error")
+	}
+	if rh.MessageOf(err) != "" {
+		t.Fatalf("Internal message leaked: %q", rh.MessageOf(err))
+	}
+
+	// panic in a middleware too
+	route = rh.Chain("r", rec("s")).With(func(rh.Context) error { panic("mw") })
+	if _, err := route.Serve(context.Background(), &P{}); rh.KindOf(err) != rh.KindInternal {
+		t.Fatalf("mw panic: %v", err)
+	}
+}
+
+func TestMustGetMissing(t *testing.T) {
+	route := rh.Chain("r", func(c *rh.Ctx[*P, *R]) error { _ = UserKey.MustGet(c); return nil })
+	_, err := route.Serve(context.Background(), &P{})
+	var pe *rh.PanicError
+	if !errors.As(err, &pe) || !strings.Contains(pe.Error(), `local "user" is not set`) {
+		t.Fatalf("err = %v", err)
+	}
+	if _, ok := UserKey.Get(&rh.Ctx[*P, *R]{}); ok {
+		t.Fatal("Get on empty ctx: ok")
+	}
+}
+
+func TestErrorHelpers(t *testing.T) {
+	err := rh.Invalid("bad %s", "order").WithFields(map[string]string{"qty": "must be > 0"}).Wrap(errors.New("cause"))
+	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "bad order" || rh.FieldsOf(err)["qty"] != "must be > 0" {
+		t.Fatalf("%v", err)
+	}
+	if err.Error() != "invalid: bad order: cause" {
+		t.Fatalf("Error() = %q", err.Error())
+	}
+	if rh.KindOf(errors.New("x")) != rh.KindInternal || rh.KindOf(context.Canceled) != rh.KindCanceled ||
+		rh.KindOf(context.DeadlineExceeded) != rh.KindTimeout {
+		t.Fatal("KindOf classification")
+	}
+}
+
+// --- cancellation and timeouts ---
+
+func TestCanceledStopsBetweenSteps(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	ran := false
+	route := rh.Chain("r",
+		func(c *rh.Ctx[*P, *R]) error { cancel(); return c.Next() },
+		func(c *rh.Ctx[*P, *R]) error { ran = true; return nil },
+	)
+	_, err := route.Serve(ctx, &P{})
+	if ran || rh.KindOf(err) != rh.KindCanceled {
+		t.Fatalf("ran %v, err %v", ran, err)
+	}
+
+	// already cancelled: nothing runs
+	if _, err := route.Serve(ctx, &P{}); rh.KindOf(err) != rh.KindCanceled {
+		t.Fatalf("err %v", err)
+	}
+}
+
+func TestTimeoutIsCooperativeAndRestored(t *testing.T) {
+	var inner, after context.Context
+	outer := func(c rh.Context) error { err := c.Next(); after = c.Base(); return err }
+	route := rh.Chain("r", func(c *rh.Ctx[*P, *R]) error {
+		inner = c.Base()
+		select {
+		case <-c.Done(): // the step reacts to the signal immediately
+			return c.Err()
+		case <-time.After(5 * time.Second):
+			return nil
+		}
+	}).With(outer, rh.Timeout(20*time.Millisecond))
+
+	start := time.Now()
+	_, err := route.Serve(context.Background(), &P{})
+	if rh.KindOf(err) != rh.KindTimeout || time.Since(start) > 2*time.Second {
+		t.Fatalf("err %v after %v", err, time.Since(start))
+	}
+	if _, ok := inner.Deadline(); !ok {
+		t.Fatal("step did not get a deadline")
+	}
+	if _, ok := after.Deadline(); ok {
+		t.Fatal("Timeout did not restore the outer context")
+	}
+}
+
+func TestCtxIsContext(t *testing.T) {
+	type key struct{}
+	ctx := context.WithValue(context.Background(), key{}, "v")
+	route := rh.Chain("r", func(c *rh.Ctx[*P, *R]) error {
+		var std context.Context = c // usable anywhere a context.Context is
+		if std.Value(key{}) != "v" || c.Route() != "r" {
+			return errors.New("context not propagated")
+		}
+		return nil
+	})
+	if _, err := route.Serve(ctx, &P{}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// --- transport contract ---
+
+func TestTransportContract(t *testing.T) {
+	route := rh.Chain("r", rec("s"))
+	if route.Name() != "r" || route.ParamsType() != reflect.TypeFor[*P]() || route.ResultType() != reflect.TypeFor[*R]() {
+		t.Fatal("accessors")
+	}
+	p, ok := route.NewParams().(*P)
+	if !ok || p == nil {
+		t.Fatalf("NewParams = %T", route.NewParams())
+	}
+	res, err := route.Serve(context.Background(), p)
+	if _, ok := res.(*R); !ok || err != nil {
+		t.Fatalf("Serve = %T, %v", res, err)
+	}
+	for _, bad := range []any{nil, (*P)(nil), &R{}} {
+		if _, err := route.Serve(context.Background(), bad); rh.KindOf(err) != rh.KindInternal {
+			t.Fatalf("Serve(%T): err %v", bad, err)
+		}
+	}
+	if _, err := rh.Run[*R, *R](context.Background(), route, &R{}); err == nil {
+		t.Fatal("Run with wrong types: no error")
+	}
+	if _, err := (rh.Route{}).Serve(context.Background(), &P{}); err == nil {
+		t.Fatal("zero Route Serve: no error")
+	}
+}
+
+func TestChainPanicsOnWiringBugs(t *testing.T) {
+	type S struct{}
+	cases := map[string]func(){
+		"empty name": func() { rh.Chain[*P, *R]("", rec("s")) },
+		"no steps":   func() { rh.Chain[*P, *R]("r") },
+		"nil step":   func() { rh.Chain[*P, *R]("r", nil) },
+		"non-ptr P":  func() { rh.Chain("r", func(*rh.Ctx[S, *R]) error { return nil }) },
+		"non-ptr R":  func() { rh.Chain("r", func(*rh.Ctx[*P, int]) error { return nil }) },
+		"nil mw":     func() { rh.Chain("r", rec("s")).With(nil) },
+		"zero route": func() { (rh.Route{}).NewParams() },
+		"timeout 0":  func() { rh.Timeout(0) },
+	}
+	for name, f := range cases {
+		t.Run(name, func(t *testing.T) {
+			defer func() {
+				if recover() == nil {
+					t.Fatal("no panic")
+				}
+			}()
+			f()
+		})
+	}
+}
