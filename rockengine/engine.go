@@ -50,10 +50,18 @@ func (ent *entry) setFailed(err error) {
 	ent.mu.Unlock()
 }
 
-// Engine manages the lifecycle of registered apps.
+// resourceEntry holds a registered Resource and whether it is initialised.
+type resourceEntry struct {
+	name   string
+	res    Resource
+	inited bool
+}
+
+// Engine manages the lifecycle of registered apps and resources.
 type Engine struct {
-	entries map[string]*entry
-	order   []string // registration order
+	entries   map[string]*entry
+	order     []string // registration order
+	resources []*resourceEntry
 
 	mu              sync.RWMutex
 	shutdownTimeout time.Duration
@@ -130,8 +138,8 @@ func (e *Engine) Register(name string, app App, policy ...RestartPolicy) (*Engin
 	if e.running {
 		return e, fmt.Errorf("cannot register app %q: engine is already running", name)
 	}
-	if _, exists := e.entries[name]; exists {
-		return e, fmt.Errorf("app %q is already registered", name)
+	if e.nameTaken(name) {
+		return e, fmt.Errorf("%q is already registered", name)
 	}
 
 	var p RestartPolicy
@@ -157,6 +165,48 @@ func (e *Engine) MustRegister(name string, app App, policy ...RestartPolicy) *En
 		panic(err)
 	}
 	return e
+}
+
+// RegisterResource adds a named Resource. Resources are initialised before
+// all apps (in registration order) and stopped after all apps (in reverse
+// order). Names share one namespace with apps.
+func (e *Engine) RegisterResource(name string, res Resource) (*Engine, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if res == nil {
+		return e, fmt.Errorf("cannot register resource %q: resource is nil", name)
+	}
+	if e.running {
+		return e, fmt.Errorf("cannot register resource %q: engine is already running", name)
+	}
+	if e.nameTaken(name) {
+		return e, fmt.Errorf("%q is already registered", name)
+	}
+	e.resources = append(e.resources, &resourceEntry{name: name, res: res})
+	return e, nil
+}
+
+// MustRegisterResource is like RegisterResource but panics on error.
+func (e *Engine) MustRegisterResource(name string, res Resource) *Engine {
+	if _, err := e.RegisterResource(name, res); err != nil {
+		panic(err)
+	}
+	return e
+}
+
+// nameTaken reports whether name is used by an app or a resource.
+// Caller must hold e.mu.
+func (e *Engine) nameTaken(name string) bool {
+	if _, ok := e.entries[name]; ok {
+		return true
+	}
+	for _, r := range e.resources {
+		if r.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // Run starts the engine with a background context.
@@ -201,8 +251,14 @@ func (e *Engine) RunContext(ctx context.Context) error {
 		e.mu.Unlock()
 	}()
 
+	// Resources first: apps may use them from Init on.
+	if err := e.initResources(baseCtx); err != nil {
+		return errors.Join(append([]error{err}, e.stopResources()...)...)
+	}
+
 	// Init sequentially to respect dependency order.
-	// On failure (including panic), stop already-initialised apps in reverse order.
+	// On failure (including panic), stop already-initialised apps in reverse
+	// order, then the resources.
 	var initDone []string
 	for _, name := range order {
 		ent := e.entries[name]
@@ -211,7 +267,8 @@ func (e *Engine) RunContext(ctx context.Context) error {
 		ent.lc.Unlock()
 		if err != nil {
 			e.stopInited(initDone)
-			return fmt.Errorf("app %q: init: %w", name, err)
+			initErr := fmt.Errorf("app %q: init: %w", name, err)
+			return errors.Join(append([]error{initErr}, e.stopResources()...)...)
 		}
 		initDone = append(initDone, name)
 	}
@@ -237,7 +294,11 @@ func (e *Engine) RunContext(ctx context.Context) error {
 	var errs []error
 
 	shutdownDone := make(chan []error, 1)
-	go func() { shutdownDone <- e.stopAll(order) }()
+	go func() {
+		errs := e.stopAll(order)
+		errs = append(errs, e.stopResources()...)
+		shutdownDone <- errs
+	}()
 
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -246,7 +307,7 @@ func (e *Engine) RunContext(ctx context.Context) error {
 		errs = append(errs, stopErrs...)
 	case <-timer.C:
 		name, _ := e.stoppingApp.Load().(string)
-		errs = append(errs, fmt.Errorf("shutdown timed out after %s while stopping app %q", timeout, name))
+		errs = append(errs, fmt.Errorf("shutdown timed out after %s while stopping %s", timeout, name))
 	}
 
 	e.mu.RLock()
@@ -608,9 +669,68 @@ func (e *Engine) stopAll(order []string) []error {
 	var errs []error
 	for i := len(order) - 1; i >= 0; i-- {
 		name := order[i]
-		e.stoppingApp.Store(name)
+		e.stoppingApp.Store(fmt.Sprintf("app %q", name))
 		errs = append(errs, e.stopEntry(e.entries[name])...)
 	}
 	e.stoppingApp.Store("")
 	return errs
+}
+
+// initResources initialises resources in registration order. On failure the
+// already-initialised ones stay marked so stopResources closes them.
+func (e *Engine) initResources(ctx context.Context) error {
+	e.mu.RLock()
+	resources := append([]*resourceEntry(nil), e.resources...)
+	e.mu.RUnlock()
+
+	for _, r := range resources {
+		if err := safeResourceInit(ctx, r); err != nil {
+			return fmt.Errorf("resource %q: init: %w", r.name, err)
+		}
+	}
+	return nil
+}
+
+// stopResources stops initialised resources in reverse registration order.
+func (e *Engine) stopResources() []error {
+	e.mu.RLock()
+	resources := append([]*resourceEntry(nil), e.resources...)
+	e.mu.RUnlock()
+
+	var errs []error
+	for i := len(resources) - 1; i >= 0; i-- {
+		r := resources[i]
+		if !r.inited {
+			continue
+		}
+		e.stoppingApp.Store(fmt.Sprintf("resource %q", r.name))
+		r.inited = false
+		if err := safeResourceStop(r); err != nil {
+			errs = append(errs, fmt.Errorf("resource %q: stop: %w", r.name, err))
+		}
+	}
+	e.stoppingApp.Store("")
+	return errs
+}
+
+func safeResourceInit(ctx context.Context, r *resourceEntry) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v\n%s", p, debug.Stack())
+		}
+	}()
+	if err := r.res.Init(ctx); err != nil {
+		return err
+	}
+	r.inited = true
+	return nil
+}
+
+func safeResourceStop(r *resourceEntry) (err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			err = fmt.Errorf("panic: %v\n%s", p, debug.Stack())
+		}
+	}()
+	return r.res.Stop()
 }

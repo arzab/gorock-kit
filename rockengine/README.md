@@ -124,6 +124,32 @@ if err := engine.Run(); err != nil {
 }
 ```
 
+## Resources
+
+Dependencies without their own run loop — database pools, cache clients — are registered as **resources**:
+
+```go
+type Resource interface {
+    Init(ctx context.Context) error
+    Stop() error
+}
+```
+
+```go
+db := rockbun.NewService(cfg.DB)
+cache := rockredis.NewService(cfg.Redis)
+
+rockengine.RegisterResource("db", db)
+rockengine.RegisterResource("redis", cache)
+rockengine.Register("http", server)
+```
+
+- Resources are initialised **before** any app, in registration order. An `Init` error stops startup and closes the resources already initialised.
+- Resources are stopped **after** every app has stopped, in reverse order — the HTTP server finishes in-flight requests before the pool they use is closed.
+- Resource `Stop` is covered by the shutdown timeout; errors are returned from `Run`.
+- Resources are not restarted and have no state in `AppStatuses`.
+- `rockbun.Service` and `rockredis.Service` satisfy `Resource`.
+
 ## Orchestration
 
 Individual apps can be controlled at runtime without affecting others:
@@ -172,6 +198,7 @@ for _, info := range rockengine.AppStatuses() {
 | `SetShutdownTimeout(d)`                           | Set global shutdown timeout (default 30s)|
 | `SetFatalHandler(fn)`                             | Set handler for fatal app failures       |
 | `SetStopOnFatal(bool)`                            | Shut down the engine when an app fails (default `true`) |
+| `RegisterResource(name, res)`                     | Register a resource (init first, stop last) |
 
 ### Engine methods
 
@@ -183,6 +210,7 @@ Same as above, plus:
 | `WithShutdownTimeout(d)`      | Set shutdown timeout            |
 | `WithFatalHandler(fn)`        | Set fatal handler               |
 | `WithStopOnFatal(bool)`       | Shut down on app failure (default `true`) |
+| `RegisterResource` / `MustRegisterResource` | Register a resource |
 
 ## Shutdown Contract
 

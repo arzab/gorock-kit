@@ -11,11 +11,14 @@ svc := rockbun.NewService(rockbun.Configs{
     DSN: "postgres://user:pass@localhost:5432/mydb?sslmode=disable",
 })
 
-ctx := context.Background()
-if err := svc.Ping(ctx); err != nil {
+// With rockengine: initialised before apps, closed after them.
+rockengine.RegisterResource("db", svc)
+
+// Standalone:
+if err := svc.Init(ctx); err != nil { // opens the pool and pings
     log.Fatal(err)
 }
-defer svc.Close()
+defer svc.Stop()
 
 db := svc.DB() // *bun.DB — use for all queries
 ```

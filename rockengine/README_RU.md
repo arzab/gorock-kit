@@ -124,6 +124,32 @@ if err := engine.Run(); err != nil {
 }
 ```
 
+## Ресурсы
+
+Зависимости без собственного цикла работы — пулы БД, клиенты кэша — регистрируются как **ресурсы**:
+
+```go
+type Resource interface {
+    Init(ctx context.Context) error
+    Stop() error
+}
+```
+
+```go
+db := rockbun.NewService(cfg.DB)
+cache := rockredis.NewService(cfg.Redis)
+
+rockengine.RegisterResource("db", db)
+rockengine.RegisterResource("redis", cache)
+rockengine.Register("http", server)
+```
+
+- Ресурсы инициализируются **до** всех apps, в порядке регистрации. Ошибка `Init` останавливает старт и закрывает уже инициализированные ресурсы.
+- Ресурсы останавливаются **после** остановки всех apps, в обратном порядке — HTTP-сервер дообрабатывает запросы до того, как закроется пул, который они используют.
+- `Stop` ресурсов покрывается таймаутом остановки; ошибки возвращаются из `Run`.
+- Ресурсы не перезапускаются и не отображаются в `AppStatuses`.
+- `rockbun.Service` и `rockredis.Service` реализуют `Resource`.
+
 ## Оркестрирование
 
 Отдельными apps можно управлять во время работы движка, не затрагивая остальные:
@@ -172,6 +198,7 @@ for _, info := range rockengine.AppStatuses() {
 | `SetShutdownTimeout(d)`                           | Таймаут остановки (по умолчанию 30s)       |
 | `SetFatalHandler(fn)`                             | Обработчик фатального падения app          |
 | `SetStopOnFatal(bool)`                            | Останавливать движок при падении app (по умолчанию `true`) |
+| `RegisterResource(name, res)`                     | Зарегистрировать ресурс (init первым, stop последним) |
 
 ### Методы Engine
 
@@ -183,6 +210,7 @@ for _, info := range rockengine.AppStatuses() {
 | `WithShutdownTimeout(d)`      | Задать таймаут остановки        |
 | `WithFatalHandler(fn)`        | Задать обработчик фатальных ошибок |
 | `WithStopOnFatal(bool)`       | Останавливаться при падении app (по умолчанию `true`) |
+| `RegisterResource` / `MustRegisterResource` | Зарегистрировать ресурс |
 
 ## Контракт остановки
 
