@@ -14,6 +14,9 @@ type Field struct {
 // F creates a Field with any value.
 func F(key string, val any) Field { return Field{Key: key, Value: val} }
 
+// Any creates a Field with any value. Same as F; named like slog.Any.
+func Any(key string, val any) Field { return Field{Key: key, Value: val} }
+
 // Err creates an error Field with key "error".
 // If err is nil, Value will be nil and logged as null — use omitempty patterns in your formatter if needed.
 func Err(err error) Field { return Field{Key: "error", Value: err} }

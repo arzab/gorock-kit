@@ -16,12 +16,13 @@ var Subscriptions = []rockbus.Subscription{
 }
 
 // Создаём App с подписками
-app := rockbus.NewApp(rockbus.Config{
-    QueueSize: 1024,
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
+app := rockbus.NewApp(
+    rockbus.Config{QueueSize: 1024},
+    func(ctx context.Context, event rockbus.Event, err error) {
         log.Error("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
     },
-}, Subscriptions...)
+    Subscriptions...,
+)
 
 // Устанавливаем как глобальный экземпляр
 rockbus.SetDefault(app)
@@ -48,7 +49,7 @@ type Config struct {
 ## Жизненный цикл
 
 ```
-NewApp(cfg, subs...) → SetDefault → Init → Exec (блокирует) → Stop
+NewApp(cfg, onError, subs...) → SetDefault → Init → Exec (блокирует) → Stop
 ```
 
 - **NewApp** принимает подписки прямо в конструктор — все топики известны до старта.
@@ -83,7 +84,7 @@ var Subscriptions = []rockbus.Subscription{
     rockbus.On("order.placed", onOrderPlaced),
 }
 
-app := rockbus.NewApp(cfg, Subscriptions...)
+app := rockbus.NewApp(cfg, onError, Subscriptions...)
 ```
 
 ### Через Subscribe (до Init)
@@ -213,18 +214,18 @@ errors.Is(err, rockbus.ErrPayload)    // payload отсутствует или �
 ### Хук OnError
 
 ```go
-rockbus.NewApp(rockbus.Config{
-    OnError: func(ctx context.Context, event rockbus.Event, err error) {
-        switch {
-        case errors.Is(err, rockbus.ErrQueueFull):
-            metrics.Inc("bus.queue_full", "topic", string(event.Topic))
-        case errors.Is(err, rockbus.ErrPanic):
-            log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        default:
-            log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
-        }
-    },
-})
+onError := func(ctx context.Context, event rockbus.Event, err error) {
+    switch {
+    case errors.Is(err, rockbus.ErrQueueFull):
+        metrics.Inc("bus.queue_full", "topic", string(event.Topic))
+    case errors.Is(err, rockbus.ErrPanic):
+        log.Error("handler panic", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    default:
+        log.Warn("bus error", rocklog.Str("topic", string(event.Topic)), rocklog.Err(err))
+    }
+}
+
+app := rockbus.NewApp(cfg, onError, subs...)
 ```
 
 `OnError` вызывается только для асинхронных ошибок. `Publish` (sync) возвращает ошибки напрямую вызывающему.

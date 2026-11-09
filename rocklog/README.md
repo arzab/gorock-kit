@@ -96,7 +96,7 @@ Every log method accepts zero or more `Field` values. Use the provided helpers:
 
 | Helper                         | Description                          |
 |--------------------------------|--------------------------------------|
-| `F(key, val)`                  | Any value                            |
+| `F(key, val)` / `Any(key, val)` | Any value                            |
 | `Err(err)`                     | Error under key `"error"`            |
 | `Str(key, val)`                | String                               |
 | `Int(key, val)`                | int                                  |
