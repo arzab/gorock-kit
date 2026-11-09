@@ -53,10 +53,15 @@ run() {
   local step="$1" m="$2"
   case "$step" in
     build)
-      # -o <dir> keeps main packages (examples/*) from dropping a binary in the module.
-      local out; out="$(mktemp -d)"
-      (cd "$m" && go build -o "$out/" ./...); local rc=$?
-      rm -rf "$out"; return $rc
+      # For modules with a main package (examples/*), -o <dir> keeps go build
+      # from dropping a binary in the module. It cannot be used for library-only
+      # modules: with no main package, go build -o <dir> fails.
+      if (cd "$m" && go list -f '{{.Name}}' ./... | grep -qx main); then
+        local out rc; out="$(mktemp -d)"
+        (cd "$m" && go build -o "$out/" ./...); rc=$?
+        rm -rf "$out"; return $rc
+      fi
+      (cd "$m" && go build ./...)
       ;;
     vet)   (cd "$m" && go vet ./...) ;;
     test) (cd "$m" && go test $race_flag -count=1 ./...) ;;
