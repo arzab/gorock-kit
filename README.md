@@ -8,7 +8,7 @@ A collection of Go modules for building production-ready applications. Each modu
 |---|---|
 | [rockengine](./rockengine) | App lifecycle orchestration: init, concurrent exec, graceful shutdown, restart policies |
 | [rockconfig](./rockconfig) | Config loader from JSON/YAML with snake_case mapping, env expansion, and validation |
-| [rocklog](./rocklog) | Structured logger interface with logrus backend and global/instance usage |
+| [rocklog](./rocklog) | Structured logger interface with a `log/slog` backend and global/instance usage |
 | [rockfiber](./rockfiber) | Fiber HTTP server with typed endpoints, middlewares, and rockengine integration |
 | [rockredis](./rockredis) | Redis client wrapper (go-redis v9) with typed Service interface |
 | [rockbun](./rockbun) | PostgreSQL wrapper (bun ORM) with connection pool and transaction helpers |
