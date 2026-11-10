@@ -180,7 +180,8 @@ func (c *Ctx[P, R]) prepare() error {
 			if errors.As(err, &e) {
 				return err
 			}
-			return &Error{Kind: KindInvalid, Message: err.Error(), Err: err}
+			// A decoder's text names Go types and fields: keep it for logs only.
+			return &Error{Kind: KindInvalid, Message: "invalid request", Err: err}
 		}
 	}
 	if v, ok := any(c.Params).(Validator); ok {

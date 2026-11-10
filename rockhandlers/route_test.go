@@ -371,8 +371,9 @@ func TestTransportContract(t *testing.T) {
 	}
 
 	// a plain fill error becomes Invalid; an *Error keeps its kind; middlewares see both
-	_, err = route.Serve(context.Background(), func(any) error { return errors.New("bad json") })
-	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "bad json" {
+	decodeErr := errors.New("json: cannot unmarshal string into Go struct field P.N of type int")
+	_, err = route.Serve(context.Background(), func(any) error { return decodeErr })
+	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "invalid request" || !errors.Is(err, decodeErr) {
 		t.Fatalf("plain fill error: %v", err)
 	}
 	_, err = route.Serve(context.Background(), func(any) error { return rh.Unauthorized("no") })

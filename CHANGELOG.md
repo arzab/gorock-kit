@@ -9,6 +9,7 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 | Module | Change | What to do |
 |---|---|---|
 | rockhandlers | A step or middleware that returns `nil` without calling `Next` no longer ends the chain: the chain continues. | Steps that ended the chain early with `return nil` (cache hits, short-circuits) → `return rockhandlers.Done`. |
+| rockhandlers | A plain error from the transport's `fill` becomes `Invalid` with the generic message "invalid request" instead of the decoder's text (the error stays as the cause). | Transports that want a precise client message return a `*rockhandlers.Error` with a safe text from `fill`. |
 | rockservices | A second `Init` of the same catalog returns `ErrAlreadyStarted` instead of initialising every service again. | Call `Init` once. |
 | rockservices | Services are looked up by typed keys. `Add(c, name, ctor, cfg)`, `Get[S](name)` and `GetFrom` are removed. | Replace `const OrdersName = "orders"` + the getter `func Orders() orders.Service { … }` with `var Orders = rockservices.NewKey[orders.Service]("orders")`; `rockservices.Add(c, OrdersName, …)` → `rockservices.Add(c, Orders, …)`; calls `services.Orders()` → `services.Orders.Get()`; `GetFrom[S](c, name)` → `key.From(c)`. |
 

@@ -57,10 +57,11 @@ A `Route` is immutable, so `Serve` may be called concurrently.
 - middlewares (logging, metrics) see decoding errors — no separate reporting channel is needed;
 - `Timeout` covers decoding;
 - a panic in `fill` becomes `Internal` instead of crashing the process;
-- if the context is already done, or a middleware doesn't call `Next`, `fill` does not run.
+- if the context is already done, or a middleware returns an error or `rockhandlers.Done`, `fill` does not run.
 
 **Errors.**
-- A plain `error` from `fill` becomes `Invalid`, **and the client sees its text.** Return a clear message without internals: `query "page": "x" is not an integer`.
+- A plain `error` from `fill` becomes `Invalid` with the generic message "invalid request"; its text stays in the cause for logs. That is safe but vague.
+- To tell the client more, return a `*rockhandlers.Error` with a clear text without Go type or struct names: `rockhandlers.Invalid("invalid JSON body")`, or `rockhandlers.Invalid("invalid query").WithFields(map[string]string{"page": "must be a number"})`.
 - Return a `*rockhandlers.Error` to control the kind and the message: for example, `rockhandlers.Unauthorized("bad signature")` when verifying a webhook signature.
 - For a body I/O failure the client can't act on, wrap it in a `*rockhandlers.Error` with `KindInternal`, so its text is hidden.
 

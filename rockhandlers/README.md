@@ -139,7 +139,7 @@ result, err := route.Serve(ctx, func(params any) error {
 // err → protocol by KindOf(err); result (an R) → protocol
 ```
 
-The fill function runs inside the chain, after the middlewares and before validation, so middlewares see decoding errors and timeouts cover decoding. A plain error from fill becomes `Invalid` with its text; return an `*Error` to control the kind and the message.
+The fill function runs inside the chain, after the middlewares and before validation, so middlewares see decoding errors and timeouts cover decoding. A plain error from fill becomes `Invalid` with the generic message "invalid request" — a decoder's text names Go types and fields, so it stays in the cause for logs only. Return an `*Error` to set the kind and a safe, precise message yourself.
 
 `ParamsType()` and `ResultType()` let a transport check routes at startup, for example to refuse a result type it cannot send.
 
