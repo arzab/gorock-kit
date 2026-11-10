@@ -1,6 +1,6 @@
-# Writing a transport for rockhandlers
+# Writing your own App
 
-A transport is an App that receives requests of its protocol (HTTP, a queue, gRPC, CLI, Telegram…) and hands them to rockhandlers routes. Reference implementation: [rockhttp](https://github.com/arzab/gorock-catalog/tree/main/rockhttp); a queue consumer example is below.
+You write your own App when there is no ready one for your technology. An App receives requests of its protocol (HTTP, a queue, gRPC, CLI, Telegram…) and hands them to rockhandlers routes. Reference implementation: [rockhttp](https://github.com/arzab/gorock-catalog/tree/main/rockhttp); a queue consumer example is below.
 
 ## Who does what
 
@@ -200,7 +200,7 @@ func (a *App) handle(ctx context.Context, msg *queue.Message) {
 }
 ```
 
-This App's `Init`, `Exec` and `Stop` are on the [Apps](https://arzab.github.io/gorock/architecture/apps) page of the GOROCK docs.
+This App's `Init`, `Exec` and `Stop` are on the [How to write an App](https://arzab.github.io/gorock/guide/apps) page of the GOROCK docs.
 
 ## Checklist
 
