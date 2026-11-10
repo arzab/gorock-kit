@@ -113,8 +113,10 @@ func (r Route) With(mws ...Middleware) Route {
 // it gets a new P (a pointer to a zero struct) and fills it from the request.
 // It runs inside the chain — after the middlewares, before validation — so
 // middlewares see decoding errors and timeouts cover decoding. A plain error
-// from fill becomes Invalid with its text; return an *Error to control the
-// kind and the message. fill may be nil.
+// from fill becomes Invalid with the generic message "invalid request" (the
+// error itself is kept as the cause, for logs) — a decoder's text names Go
+// types and fields and must not reach the client. Return an *Error to set the
+// kind and a safe, precise message yourself. fill may be nil.
 //
 // Serve never panics. On error the result is nil — a partly filled Result
 // does not leak; classify the error with KindOf. On success the result is

@@ -3,6 +3,7 @@ package rockhandlers_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"reflect"
 	"strings"
 	"testing"
@@ -141,7 +142,7 @@ func TestEarlyExitAndRepeatedNext(t *testing.T) {
 	cache := func(c *rh.Ctx[*P, *R]) error {
 		if c.Params.N == 1 {
 			c.Result.Log = []string{"cached"}
-			return nil // no Next: chain ends successfully
+			return rh.Done // early success: the rest of the chain is skipped
 		}
 		err1 := c.Next()
 		err2 := c.Next() // no-op, same result
@@ -160,6 +161,70 @@ func TestEarlyExitAndRepeatedNext(t *testing.T) {
 	if _, err := rh.Run[*R](context.Background(), route, &P{N: 2}); err != nil || calls != 1 {
 		t.Fatalf("repeated Next: err %v, calls %d", err, calls)
 	}
+}
+
+// A step that returns nil without calling Next does not end the chain.
+func TestStepWithoutNextContinues(t *testing.T) {
+	quiet := func(name string) rh.Handler[*P, *R] {
+		return func(c *rh.Ctx[*P, *R]) error {
+			c.Result.Log = append(c.Result.Log, name)
+			return nil // no Next
+		}
+	}
+	res, err := rh.Run[*R](context.Background(), rh.Chain("r", quiet("a"), quiet("b"), quiet("c")), &P{})
+	if err != nil || strings.Join(res.Log, " ") != "a b c" {
+		t.Fatalf("res %+v, err %v", res, err)
+	}
+
+	// explicit Next: every step still runs exactly once
+	res, err = rh.Run[*R](context.Background(), rh.Chain("r", rec("a"), quiet("b"), rec("c")), &P{})
+	if err != nil || strings.Join(res.Log, " ") != "a b c" {
+		t.Fatalf("mixed: res %+v, err %v", res, err)
+	}
+}
+
+func TestDoneInTheMiddle(t *testing.T) {
+	var seen []string
+	mw := func(c rh.Context) error {
+		err := c.Next()
+		seen = append(seen, fmt.Sprint(err))
+		return err
+	}
+	stop := func(c *rh.Ctx[*P, *R]) error {
+		c.Result.Log = append(c.Result.Log, "stop")
+		return rh.Done
+	}
+	route := rh.Chain("r", rec("a"), stop, rec("never")).With(mw)
+	res, err := rh.Run[*R](context.Background(), route, &P{})
+	if err != nil || strings.Join(res.Log, " ") != "a stop" {
+		t.Fatalf("res %+v, err %v", res, err)
+	}
+	if fmt.Sprint(seen) != "[<nil>]" {
+		t.Fatalf("middleware saw %v", seen)
+	}
+	// Done never leaves Serve
+	if _, err := route.Serve(context.Background(), nil); err != nil {
+		t.Fatalf("Serve = %v", err)
+	}
+}
+
+func TestDoneFromMiddleware(t *testing.T) {
+	validated, stepped := false, false
+	route := rh.Chain("r", func(*rh.Ctx[*validating, *R]) error { stepped = true; return nil }).
+		With(func(rh.Context) error { return rh.Done })
+	res, err := rh.Run[*R](context.Background(), route, &validating{check: func() { validated = true }})
+	if err != nil || res == nil || validated || stepped {
+		t.Fatalf("res %v, err %v, validated %v, stepped %v", res, err, validated, stepped)
+	}
+}
+
+type validating struct{ check func() }
+
+func (v *validating) Validate() error {
+	if v.check != nil {
+		v.check()
+	}
+	return nil
 }
 
 // --- errors, panics, no leak ---
@@ -306,8 +371,9 @@ func TestTransportContract(t *testing.T) {
 	}
 
 	// a plain fill error becomes Invalid; an *Error keeps its kind; middlewares see both
-	_, err = route.Serve(context.Background(), func(any) error { return errors.New("bad json") })
-	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "bad json" {
+	decodeErr := errors.New("json: cannot unmarshal string into Go struct field P.N of type int")
+	_, err = route.Serve(context.Background(), func(any) error { return decodeErr })
+	if rh.KindOf(err) != rh.KindInvalid || rh.MessageOf(err) != "invalid request" || !errors.Is(err, decodeErr) {
 		t.Fatalf("plain fill error: %v", err)
 	}
 	_, err = route.Serve(context.Background(), func(any) error { return rh.Unauthorized("no") })

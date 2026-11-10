@@ -28,19 +28,16 @@ func (r *repository) Find(ctx context.Context, id string) (string, error) { retu
 
 // --- pkg/services/services.go ---
 
-// Names are given at registration and kept here, with the getters.
-const RepositoryName = "repository"
+// Keys are declared once, next to the registration.
+var RepositoryKey = rockservices.NewKey[Repository]("repository")
 
 type ServicesConfigs struct {
 	Repository Configs
 }
 
 func Register(c *rockservices.Catalog, cfg ServicesConfigs) {
-	rockservices.Add(c, RepositoryName, NewService, cfg.Repository) // add order = init order
+	rockservices.Add(c, RepositoryKey, NewService, cfg.Repository) // add order = init order
 }
-
-// RepositoryService is the getter every layer uses.
-func RepositoryService() Repository { return rockservices.Get[Repository](RepositoryName) }
 
 func Example() {
 	// cmd/main: services start before the apps and stop after them.
@@ -55,5 +52,5 @@ func Example() {
 	}()
 
 	// anywhere: delivery, apps, other services' constructors
-	_, _ = RepositoryService().Find(context.Background(), "42")
+	_, _ = RepositoryKey.Get().Find(context.Background(), "42")
 }
