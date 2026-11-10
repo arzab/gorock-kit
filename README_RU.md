@@ -6,7 +6,7 @@
 |---|---|
 | [rockengine](./rockengine) | Жизненный цикл apps: старт в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
-| [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит под типизированными ключами, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
+| [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по названию, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
 | [rockhandlers](./rockhandlers) | Обработка запросов без привязки к транспорту: цепочка типизированных шагов с `Next`, Locals, middleware, валидацией, перехватом паник и видами ошибок — любой транспорт (HTTP, очередь, CLI) запускает одни и те же маршруты |
 
 Go 1.26+. `rockengine`, `rockservices` и `rockhandlers` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
@@ -16,7 +16,7 @@ HTTP-сервер, сервисы PostgreSQL/Redis, логгер, шина со�
 ## Как они связаны
 
 ```
-cmd/main:  rockconfig → rockservices.Init → rockengine.Run (apps) → rockservices.Stop
+cmd/main:  rockconfig → services.Init → rockengine.Run (apps) → services.Stop
 ```
 
 Сервисы — отдельный слой: стартуют до apps и останавливаются после них. Движок запускает только apps:
@@ -50,11 +50,10 @@ func Exec(ctx context.Context) error {
         return err
     }
 
-    services.Register(rockservices.Default(), cfg.Services)
-    if err := rockservices.Init(ctx); err != nil {
+    if err := services.Init(ctx, cfg.Services); err != nil {
         return err
     }
-    defer rockservices.Stop()
+    defer services.Stop()
 
     engine := rockengine.NewEngine()
     apps.Register(engine, cfg.Apps)
@@ -64,17 +63,22 @@ func Exec(ctx context.Context) error {
 
 ```go
 // pkg/services/services.go
-var Repository = rockservices.NewKey[repository.Service]("repository") // typed key
+const RepositoryName = "repository"
 
-type Configs struct {
-    Repository repository.Configs
+var catalog *rockservices.Catalog
+
+func Init(ctx context.Context, cfg Configs) error {
+    catalog = rockservices.New(map[string]rockservices.Service{
+        RepositoryName: repository.NewService(cfg.Repository),
+    })
+    return catalog.Init(ctx, RepositoryName)
 }
 
-func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, Repository, repository.NewService, cfg.Repository)
-}
+func Stop() error { return catalog.Stop() }
 
-// где угодно: services.Repository.Get().Insert(ctx, order)
+func Repository() repository.Service { return catalog.Get(RepositoryName).(repository.Service) }
+
+// где угодно: services.Repository().Insert(ctx, task)
 ```
 
 Куда класть код и почему — [архитектура GOROCK](https://arzab.github.io/gorock/architecture/).

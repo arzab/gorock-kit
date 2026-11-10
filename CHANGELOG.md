@@ -4,6 +4,12 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
+### ⚠️ Changes that need action
+
+| Module | Change | What to do |
+|---|---|---|
+| rockservices | Rewritten to a small map-based catalog. `Key`/`NewKey`, `Add`, `Default`, `SetDefault`, the package-level `Init`/`Stop` and `ErrAlreadyStarted` are removed. `New(map[string]Service)` takes all services at once; `Get(name)` returns `Service`; `Init(ctx, names...)` starts them in the given order; `Stop(names...)` stops in reverse init order (or in the given order). | In `pkg/services/services.go`: keep a package `catalog`, build it in `Init(ctx, cfg)` with `rockservices.New(map[string]rockservices.Service{RepositoryName: repository.NewService(cfg.Repository), …})` and `catalog.Init(ctx, …names in order)`; add `Stop()` and typed getters `func Repository() repository.Service { return catalog.Get(RepositoryName).(repository.Service) }`. In `cmd/main`: `services.Init(ctx, cfg.Services)` + `defer services.Stop()`. Shared children: create first, put into the map and pass to the parent's constructor. Tests: swap the package catalog (e.g. a `UseCatalog` helper). |
+
 ## v0.5.0 — 2026-11-10
 
 ### ⚠️ Changes that need action
