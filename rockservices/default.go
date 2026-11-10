@@ -25,6 +25,9 @@ func Default() *Catalog { return defaultCatalog.Load() }
 //	rockservices.Add(c, services.Orders, func(struct{}) orders.Service { return &fakeOrders{} }, struct{}{})
 //	t.Cleanup(func() { rockservices.SetDefault(rockservices.SetDefault(c)) })
 //
+// Tests that swap the default catalog must not run with t.Parallel(): the
+// default catalog is one per process.
+//
 // Don't call it in production code: services.Register fills Default().
 func SetDefault(c *Catalog) (previous *Catalog) {
 	if c == nil {

@@ -71,18 +71,18 @@ err := services.Orders.Get().Insert(ctx, order) // typed, no cast
 ## Dependencies between services
 
 - **A service owns a child service** (a repository creates its own pool): nothing to do. The catalog sees only the parent, which opens and closes the child itself.
-- **A shared dependency** is a service in the catalog too. Register it first and pass it to the constructor through a closure:
+- **A shared dependency** is a service in the catalog too. Register it first and pass the **value `Add` returned** to the constructor:
 
 ```go
 func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, Postgres, postgres.NewService, cfg.Postgres)
+    pg := rockservices.Add(c, Postgres, postgres.NewService, cfg.Postgres)
     rockservices.Add(c, Orders, func(cfg orders.Configs) orders.Service {
-        return orders.NewService(cfg, PostgresDB()) // created, not opened yet — use it from Init on
+        return orders.NewService(cfg, pg) // created, not opened yet — use it from Init on
     }, cfg.Orders)
 }
 ```
 
-A service package doesn't know the name its dependency is registered under; all wiring stays in `services.go`.
+Don't call `key.Get()` inside a constructor: it reads the default catalog, not the one being filled, so `Register(rockservices.New(), cfg)` would wire the wrong service or panic. A service package doesn't know the key its dependency is registered under; all wiring stays in `services.go`.
 
 **Two instances of one service** are two keys and two registrations:
 
@@ -108,14 +108,14 @@ func TestCreateOrder(t *testing.T) {
 }
 ```
 
-`SetDefault` is for tests; in production `services.Register` fills `Default()`.
+`SetDefault` is for tests; in production `services.Register` fills `Default()`. There is one default catalog per process, so tests that swap it **must not run with `t.Parallel()`**.
 
 ## Rules
 
 - Services are stored **by key**. `key.Get()` reads the default catalog, `key.From(c)` a given one. A service missing from the catalog panics with its name (never after a successful `Init` of the default catalog).
 - `Init` of the default catalog first checks that every declared key was added and names the missing ones. Catalogs from `New()` don't check.
 - `Add` calls the constructor immediately. It panics on a nil key, an empty or duplicate name (also across two different keys), a nil service, a constructor panic, or a call after `Init` — wiring bugs surface at startup.
-- `Init` runs in add order. If one fails, the services already opened are closed in reverse order, and the error names the service.
+- `Init` runs in add order, once: a second call returns `ErrAlreadyStarted`. If one fails, the services already opened are closed in reverse order, and the error names the service.
 - `Stop` runs in reverse order, collects every error, is safe to call twice, and is bounded by a timeout (30s, `WithStopTimeout`) that names the hanging service.
 - Panics in `Init`/`Stop` are returned as errors.
 - `rockservices.New()` is an isolated catalog (`key.From(c)`); `SetDefault` makes it the default in tests.

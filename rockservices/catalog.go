@@ -34,8 +34,12 @@ import (
 	"reflect"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// ErrAlreadyStarted is returned by a second Init of the same catalog.
+var ErrAlreadyStarted = errors.New("rockservices: catalog already initialised")
 
 const defaultStopTimeout = 30 * time.Second
 
@@ -84,6 +88,17 @@ func (c *Catalog) WithStopTimeout(d time.Duration) *Catalog {
 //	rockservices.Add(c, Orders, orders.NewService, cfg.Orders)
 //
 // Constructors must not open connections: that belongs in Init.
+//
+// To wire a dependency, pass the value Add returned for it:
+//
+//	pg := rockservices.Add(c, Postgres, postgres.NewService, cfg.Postgres)
+//	rockservices.Add(c, Orders, func(cfg orders.Configs) orders.Service {
+//	    return orders.NewService(cfg, pg)
+//	}, cfg.Orders)
+//
+// Don't call key.Get() inside a constructor: it reads Default(), not the
+// catalog c being filled, so Register(rockservices.New(), cfg) would wire the
+// wrong service or panic.
 //
 // Add panics on a nil key, an empty or duplicate name, a nil service, a
 // constructor panic, or a call after Init: all of them are wiring bugs found
@@ -148,6 +163,7 @@ func (c *Catalog) Names() []string {
 
 // Init initialises services in add order. If one fails, the ones already
 // initialised are stopped in reverse order and the error names the service.
+// A catalog is initialised once: a second Init returns ErrAlreadyStarted.
 //
 // The default catalog first checks that every key declared with NewKey was
 // added, and fails naming the missing ones — a forgotten registration stops
@@ -160,6 +176,10 @@ func (c *Catalog) Init(ctx context.Context) error {
 		}
 	}
 	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return ErrAlreadyStarted
+	}
 	c.started = true
 	order := append([]*entry(nil), c.order...)
 	c.mu.Unlock()
@@ -183,7 +203,7 @@ func (c *Catalog) Stop() error {
 	timeout := c.stopTimeout
 	c.mu.RUnlock()
 
-	var current sync.Map // "name" -> service being stopped, for the timeout error
+	var current atomic.Pointer[string] // the service being stopped, for the timeout error
 	done := make(chan []error, 1)
 	go func() { done <- c.stopTracking(&current) }()
 
@@ -193,14 +213,17 @@ func (c *Catalog) Stop() error {
 	case errs := <-done:
 		return errors.Join(errs...)
 	case <-timer.C:
-		name, _ := current.Load("name")
+		name := ""
+		if p := current.Load(); p != nil {
+			name = *p
+		}
 		return fmt.Errorf("rockservices: stop timed out after %s while stopping service %q", timeout, name)
 	}
 }
 
 func (c *Catalog) stop() []error { return c.stopTracking(nil) }
 
-func (c *Catalog) stopTracking(current *sync.Map) []error {
+func (c *Catalog) stopTracking(current *atomic.Pointer[string]) []error {
 	c.mu.Lock()
 	order := append([]*entry(nil), c.order...)
 	c.mu.Unlock()
@@ -216,7 +239,8 @@ func (c *Catalog) stopTracking(current *sync.Map) []error {
 			continue
 		}
 		if current != nil {
-			current.Store("name", e.name)
+			name := e.name
+			current.Store(&name)
 		}
 		if err := safeStop(e.svc); err != nil {
 			errs = append(errs, fmt.Errorf("service %q: stop: %w", e.name, err))

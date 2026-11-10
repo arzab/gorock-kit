@@ -310,3 +310,37 @@ func TestFromReadsItsCatalog(t *testing.T) {
 		t.Fatal("Name/String")
 	}
 }
+
+// Dependencies are wired through the value Add returned, so registering into
+// a catalog from New() never touches Default().
+func TestWiringByReturnedValue(t *testing.T) {
+	before := Default().Names()
+	l := &log{}
+	c := New()
+	db := Add(c, fk("wire-db"), ctor(l, "wire-db"), struct{}{})
+	repo := Add(c, fk("wire-repo"), func(struct{}) *fake {
+		return &fake{name: "wire-repo", l: l, dep: db}
+	}, struct{}{})
+	if repo.dep != db {
+		t.Fatal("dependency not wired")
+	}
+	if fmt.Sprint(Default().Names()) != fmt.Sprint(before) {
+		t.Fatalf("Default() changed: %v", Default().Names())
+	}
+}
+
+func TestInitTwice(t *testing.T) {
+	l := &log{}
+	c := New()
+	Add(c, fk("twice"), ctor(l, "twice"), struct{}{})
+	if err := c.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Init(context.Background()); !errors.Is(err, ErrAlreadyStarted) {
+		t.Fatalf("second Init = %v", err)
+	}
+	if l.String() != "twice:init" {
+		t.Fatalf("services initialised twice: %s", l)
+	}
+	_ = c.Stop()
+}
