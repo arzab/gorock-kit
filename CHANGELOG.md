@@ -4,6 +4,8 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
+## v0.5.0 — 2026-11-10
+
 ### ⚠️ Changes that need action
 
 | Module | Change | What to do |
