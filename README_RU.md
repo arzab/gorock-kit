@@ -31,7 +31,6 @@ type App interface {
 
 // сервис в pkg/services: БД, кэш, внешний API
 type Service interface {
-    Name() string
     Init(ctx context.Context) error
     Stop() error
 }
@@ -65,15 +64,19 @@ func Exec(ctx context.Context) error {
 
 ```go
 // pkg/services/services.go
+const RepositoryName = "repository" // the name is given at registration
+
 type Configs struct {
     Repository repository.Configs
 }
 
 func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, repository.NewService, cfg.Repository)
+    rockservices.Add(c, RepositoryName, repository.NewService, cfg.Repository)
 }
 
-// где угодно: rockservices.Get[repository.Service](repository.Name)
+func Repository() repository.Service { return rockservices.Get[repository.Service](RepositoryName) }
+
+// где угодно: services.Repository().Insert(ctx, order)
 ```
 
 Куда класть код и почему — [архитектура GOROCK](https://arzab.github.io/gorock/architecture/).

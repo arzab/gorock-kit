@@ -31,7 +31,6 @@ type App interface {
 
 // a service in pkg/services: DB, cache, external API
 type Service interface {
-    Name() string
     Init(ctx context.Context) error
     Stop() error
 }
@@ -65,15 +64,19 @@ func Exec(ctx context.Context) error {
 
 ```go
 // pkg/services/services.go
+const RepositoryName = "repository" // the name is given at registration
+
 type Configs struct {
     Repository repository.Configs
 }
 
 func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, repository.NewService, cfg.Repository)
+    rockservices.Add(c, RepositoryName, repository.NewService, cfg.Repository)
 }
 
-// anywhere: rockservices.Get[repository.Service](repository.Name)
+func Repository() repository.Service { return rockservices.Get[repository.Service](RepositoryName) }
+
+// anywhere: services.Repository().Insert(ctx, order)
 ```
 
 Where each piece of code goes and why: [GOROCK architecture](https://arzab.github.io/gorock/architecture/).

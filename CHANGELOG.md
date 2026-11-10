@@ -4,6 +4,12 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 ## Unreleased
 
+## v0.4.0 — 2026-11-10
+
+### ⚠️ Changes that need action
+
+- **rockservices:** the name of a service now belongs to its registration, not to the service. `Service` is `Init(ctx) error` + `Stop() error` (no `Name()`), and `Add` takes the name: `rockservices.Add(c, name, ctor, cfg)`. The same service can be added twice under two names. Migration: delete `Name()` from your services, move the name constants to `pkg/services/services.go` and pass them to `Add`; put the getters there too (`func Orders() orders.Service { return rockservices.Get[orders.Service](OrdersName) }`).
+
 ## v0.3.0 — 2026-11-10
 
 ### Added

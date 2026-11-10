@@ -18,7 +18,7 @@ func Default() *Catalog { return defaultCatalog.Load() }
 // restore the old one afterwards, so code that calls Get sees the fakes.
 //
 //	c := rockservices.New()
-//	rockservices.Add(c, fakeRepository, struct{}{})
+//	rockservices.Add(c, services.Orders, fakeOrders, struct{}{})
 //	t.Cleanup(func() { rockservices.SetDefault(rockservices.SetDefault(c)) })
 //
 // Don't call it in production code: services.Register fills Default().
@@ -32,7 +32,10 @@ func SetDefault(c *Catalog) (previous *Catalog) {
 // Get returns the service stored under name in the default catalog as type S.
 // It panics if there is no such service or it is not an S.
 //
-//	repo := rockservices.Get[repository.Service](repository.Name)
+//	orders := rockservices.Get[orders.Service](services.Orders)
+//
+// Projects wrap it in getters next to the registration, so the name and the
+// type are written once: services.OrdersRepository().
 func Get[S any](name string) S { return GetFrom[S](Default(), name) }
 
 // Init initialises the default catalog. See Catalog.Init.

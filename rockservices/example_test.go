@@ -11,8 +11,6 @@ import (
 
 // --- pkg/services/repository ---
 
-const Name = "repository"
-
 type Configs struct{ DSN string }
 
 type Repository interface {
@@ -24,20 +22,25 @@ type repository struct{ cfg Configs }
 
 func NewService(cfg Configs) Repository { return &repository{cfg: cfg} }
 
-func (r *repository) Name() string                                        { return Name }
 func (r *repository) Init(ctx context.Context) error                      { return nil } // open the pool here
 func (r *repository) Stop() error                                         { return nil }
 func (r *repository) Find(ctx context.Context, id string) (string, error) { return id, nil }
 
 // --- pkg/services/services.go ---
 
+// Names are given at registration and kept here, with the getters.
+const RepositoryName = "repository"
+
 type ServicesConfigs struct {
 	Repository Configs
 }
 
 func Register(c *rockservices.Catalog, cfg ServicesConfigs) {
-	rockservices.Add(c, NewService, cfg.Repository) // add order = init order
+	rockservices.Add(c, RepositoryName, NewService, cfg.Repository) // add order = init order
 }
+
+// RepositoryService is the getter every layer uses.
+func RepositoryService() Repository { return rockservices.Get[Repository](RepositoryName) }
 
 func Example() {
 	// cmd/main: services start before the apps and stop after them.
@@ -52,6 +55,5 @@ func Example() {
 	}()
 
 	// anywhere: delivery, apps, other services' constructors
-	repo := rockservices.Get[Repository](Name)
-	_, _ = repo.Find(context.Background(), "42")
+	_, _ = RepositoryService().Find(context.Background(), "42")
 }

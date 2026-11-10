@@ -2,22 +2,17 @@ package rockservices
 
 import "context"
 
-// Service is what every service in pkg/services implements.
+// Service is what every service in pkg/services implements: a wrapper over a
+// technology or a piece of logic that has a lifecycle. Its name is not part
+// of the service — it is given when the service is added to the catalog, so
+// the same service can be added twice under different names.
 //
-//	// pkg/services/repository/interface.go
-//	const Name = "repository"
-//
+//	// pkg/services/orders/interface.go
 //	type Service interface {
 //	    rockservices.Service
-//	    Insert(ctx context.Context, model any) error
+//	    Insert(ctx context.Context, order any) error
 //	}
-//
-//	// pkg/services/repository/service.go
-//	func (s *service) Name() string { return Name }
 type Service interface {
-	// Name is the key the service is stored and looked up under. By
-	// convention it returns the package's Name constant.
-	Name() string
 	// Init opens connections. ctx bounds startup (e.g. a connect timeout).
 	Init(ctx context.Context) error
 	// Stop releases everything Init opened.

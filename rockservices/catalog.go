@@ -58,32 +58,39 @@ func (c *Catalog) WithStopTimeout(d time.Duration) *Catalog {
 	return c
 }
 
-// Add calls ctor(cfg) right away and stores the result under svc.Name().
+// Add calls ctor(cfg) right away and stores the result under name. The name
+// belongs to the registration, not to the service: keep the names as
+// constants next to the registration (pkg/services/services.go), and add the
+// same service twice under two names if you need two instances.
+//
 // The constructor may Get services added before it — that is how shared
 // dependencies are wired; add dependencies first. Constructors must not open
 // connections: that belongs in Init.
 //
-//	rockservices.Add(c, repository.NewService, cfg.Repository)
+//	rockservices.Add(c, Orders, orders.NewService, cfg.Orders)
 //
-// Add panics on a nil service, an empty or duplicate name, a constructor
+// Add panics on an empty or duplicate name, a nil service, a constructor
 // panic, or a call after Init: all of them are wiring bugs found at startup.
-func Add[C any, S Service](c *Catalog, ctor func(C) S, cfg C) S {
+func Add[C any, S Service](c *Catalog, name string, ctor func(C) S, cfg C) S {
 	kind := reflect.TypeFor[S]().String()
+	if name == "" {
+		panic(fmt.Sprintf("rockservices: %s added with an empty name", kind))
+	}
 	c.mu.RLock()
 	started := c.started
+	_, dup := c.byName[name]
 	c.mu.RUnlock()
 	if started {
-		panic(fmt.Sprintf("rockservices: %s added after Init", kind))
+		panic(fmt.Sprintf("rockservices: service %q (%s) added after Init", name, kind))
+	}
+	if dup {
+		panic(fmt.Sprintf("rockservices: service %q added twice", name))
 	}
 
 	// Construct without holding the lock: the constructor may Get earlier services.
-	svc := construct(kind, ctor, cfg)
+	svc := construct(name, kind, ctor, cfg)
 	if any(svc) == nil {
-		panic(fmt.Sprintf("rockservices: constructor of %s returned nil", kind))
-	}
-	name := svc.Name()
-	if name == "" {
-		panic(fmt.Sprintf("rockservices: %s has an empty Name()", kind))
+		panic(fmt.Sprintf("rockservices: constructor of service %q (%s) returned nil", name, kind))
 	}
 
 	c.mu.Lock()
@@ -97,10 +104,10 @@ func Add[C any, S Service](c *Catalog, ctor func(C) S, cfg C) S {
 	return svc
 }
 
-func construct[C any, S Service](kind string, ctor func(C) S, cfg C) S {
+func construct[C any, S Service](name, kind string, ctor func(C) S, cfg C) S {
 	defer func() {
 		if r := recover(); r != nil {
-			panic(fmt.Sprintf("rockservices: constructing %s: %v", kind, r))
+			panic(fmt.Sprintf("rockservices: constructing service %q (%s): %v", name, kind, r))
 		}
 	}()
 	return ctor(cfg)
