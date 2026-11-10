@@ -6,7 +6,7 @@ The core of [GOROCK](https://arzab.github.io/gorock/) — the structural pieces 
 |---|---|
 | [rockengine](./rockengine) | Apps lifecycle: start in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
 | [rockconfig](./rockconfig) | One config file (YAML/JSON) → typed `Configs`: snake_case mapping, `${ENV:-default}`, defaults, required fields and unknown-key checks |
-| [rockservices](./rockservices) | Services layer: one catalog that creates, stores by name, hands out, initialises and stops the services of `pkg/services` |
+| [rockservices](./rockservices) | Services layer: one catalog that creates, stores under typed keys, hands out, initialises and stops the services of `pkg/services` |
 | [rockhandlers](./rockhandlers) | Transport-independent request handling: a chain of typed steps with `Next`, Locals, middlewares, validation, panic recovery and error kinds — any transport (HTTP, queue, CLI) runs the same routes |
 
 Go 1.26+. `rockengine`, `rockservices` and `rockhandlers` use only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
@@ -97,7 +97,7 @@ claude plugin marketplace add arzab/gorock
 claude plugin install gorock@gorock
 ```
 
-For Codex, Cursor and other agents, put [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) in your project root. Note: the plugin's recipes still target the full kit `v0.2.0` and will be updated to the core + catalog split.
+For Codex, Cursor and other agents, put [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) in your project root.
 
 ## Local development
 

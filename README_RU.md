@@ -6,7 +6,7 @@
 |---|---|
 | [rockengine](./rockengine) | Жизненный цикл apps: старт в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
-| [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по имени, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
+| [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит под типизированными ключами, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
 | [rockhandlers](./rockhandlers) | Обработка запросов без привязки к транспорту: цепочка типизированных шагов с `Next`, Locals, middleware, валидацией, перехватом паник и видами ошибок — любой транспорт (HTTP, очередь, CLI) запускает одни и те же маршруты |
 
 Go 1.26+. `rockengine`, `rockservices` и `rockhandlers` используют только стандартную библиотеку; `rockconfig` добавляет `gopkg.in/yaml.v3`.
@@ -97,7 +97,7 @@ claude plugin marketplace add arzab/gorock
 claude plugin install gorock@gorock
 ```
 
-Для Codex, Cursor и других агентов положите [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) в корень проекта. Рецепты плагина пока написаны под полный kit `v0.2.0` и будут обновлены под разделение на ядро и каталог.
+Для Codex, Cursor и других агентов положите [AGENTS.md](https://github.com/arzab/gorock/blob/main/plugin/skills/service/templates/AGENTS.md) в корень проекта.
 
 ## Локальная разработка
 

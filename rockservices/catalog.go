@@ -50,7 +50,7 @@ type entry struct {
 	inited bool
 }
 
-// Catalog holds services by name, in the order they were added.
+// Catalog holds services by key, in the order they were added.
 // Init order is add order; Stop runs in reverse.
 type Catalog struct {
 	mu          sync.RWMutex
