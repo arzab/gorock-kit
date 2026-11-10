@@ -3,50 +3,66 @@ package rockhandlers_test
 import (
 	"context"
 	"fmt"
-	"time"
+	"strings"
 
 	"github.com/arzab/gorock-kit/rockhandlers"
 )
 
-type GetOrderParams struct {
-	BearerAuth        // satisfies TokenParams → the Bearer step can be used
-	ID         string `path:"id"`
+// --- internal/handlers/tasks ---
+
+type CreateParams struct {
+	Token string `header:"Authorization"`
+	Title string `json:"title"`
 }
 
-type GetOrderResult struct {
-	ID    string
-	Owner string
-}
-
-func getOrder(c *rockhandlers.Ctx[*GetOrderParams, *GetOrderResult]) error {
-	if c.Params.ID == "" {
-		return rockhandlers.NotFound("order not found")
+func (p *CreateParams) Validate() error {
+	if strings.TrimSpace(p.Title) == "" {
+		return rockhandlers.Invalid("invalid task").WithFields(map[string]string{"title": "required"})
 	}
-	c.Result.ID = c.Params.ID
-	c.Result.Owner = UserKey.MustGet(c).Name
 	return nil
 }
 
-func logErrors(c rockhandlers.Context) error {
+type CreateResponse struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+}
+
+func (r *CreateResponse) Normalize() error { return nil }
+
+func checkAuth(c *rockhandlers.Ctx, params *CreateParams, _ *CreateResponse) error {
+	if params.Token == "" {
+		return rockhandlers.Unauthorized("token required")
+	}
+	return c.Next() // go on
+}
+
+func create(_ *rockhandlers.Ctx, params *CreateParams, response *CreateResponse) error {
+	response.ID, response.Title = "42", params.Title
+	return nil // done
+}
+
+var Create = rockhandlers.Chain(checkAuth, create)
+
+// --- an App's middleware ---
+
+func logErrors(c *rockhandlers.Ctx, _ rockhandlers.Params, _ rockhandlers.Response) error {
 	err := c.Next()
 	if err != nil {
-		fmt.Printf("%s: %s\n", c.Route(), rockhandlers.KindOf(err))
+		fmt.Println("failed:", rockhandlers.KindOf(err))
 	}
 	return err
 }
 
 func Example() {
-	route := rockhandlers.Chain("orders.get", Bearer, getOrder).
-		With(logErrors, rockhandlers.Timeout(time.Second))
+	pipeline := Create.Use(logErrors)
 
-	res, err := rockhandlers.Run[*GetOrderResult](context.Background(), route,
-		&GetOrderParams{BearerAuth: BearerAuth{Authorization: "Bearer ann"}, ID: "42"})
-	fmt.Println(res.ID, res.Owner, err)
+	res, err := pipeline.Call(context.Background(), &CreateParams{Token: "t", Title: "write docs"})
+	fmt.Println(res.(*CreateResponse).ID, err)
 
-	_, err = rockhandlers.Run[*GetOrderResult](context.Background(), route, &GetOrderParams{ID: "42"})
+	_, err = pipeline.Call(context.Background(), &CreateParams{Title: "write docs"})
 	fmt.Println(rockhandlers.MessageOf(err))
 	// Output:
-	// 42 ann <nil>
-	// orders.get: unauthorized
+	// 42 <nil>
+	// failed: unauthorized
 	// token required
 }

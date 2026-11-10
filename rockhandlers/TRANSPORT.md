@@ -1,215 +1,92 @@
 # Writing your own App
 
-You write your own App when there is no ready one for your technology. An App receives requests of its protocol (HTTP, a queue, gRPC, CLI, Telegram…) and hands them to rockhandlers routes. Reference implementation: [rockhttp](https://github.com/arzab/gorock-catalog/tree/main/rockhttp); a queue consumer example is below.
+You write your own App when there is no ready one for your technology: a queue, gRPC, a bot, a CLI. An App receives requests of its protocol and runs handler chains. A ready example: [rockhttp](https://github.com/arzab/gorock-catalog/tree/main/rockhttp).
 
 ## Who does what
 
-| rockhandlers (done) | The transport (yours) |
+| rockhandlers (done) | The App (yours) |
 |---|---|
-| the chain: middlewares → decoding → `Validate` → steps | receive a request / message of your protocol |
-| panic recovery everywhere, including your decoding | fill `Params` from the request (the `fill` function) |
-| error kinds, `Canceled` / `Timeout` from the context | turn the `Result` into a protocol response |
-| Locals, middlewares, `Timeout` | turn the error **kind** into a protocol response |
-| a new `Ctx` per call; the `Result` never leaks on error | the App lifecycle, shutdown, concurrency, limits |
+| order: middlewares → decoding → `Validate` → handlers → `Normalize` | receive a request |
+| panic recovery everywhere | decode the request into the params (the `fill` function) |
+| error kinds, cancellation, timeouts | turn the response and the error kind into the protocol's reply |
+| | start, stop, concurrency, limits |
 
-Don't repeat in the transport what the chain already does: your own `recover` around `Serve`, validation, logging of route errors. Logging is a rockhandlers middleware.
+Don't repeat in the App what is already there: your own `recover`, params validation, logging of handler errors (that is a middleware).
 
-## The minimal loop
+## The main loop
 
 ```go
-result, err := route.Serve(ctx, func(params any) error {
-    return decode(req, params) // fill the new P from the request
+response, err := pipeline.Run(ctx, func(params rockhandlers.Params) error {
+    return decode(req, params) // params is a new, empty params struct
 })
 if err != nil {
-    writeError(resp, err)      // by rockhandlers.KindOf(err)
+    writeError(resp, err) // by rockhandlers.KindOf(err)
     return
 }
-writeResult(resp, result)      // result is the route's R (a pointer to a struct)
+writeResponse(resp, response)
 ```
 
-The rest of this guide is the details of these three lines.
+## 1. Mounting chains
 
-## Step 1. Describe routes and check them at startup
-
-Each transport has its own "mount point": HTTP has a method and a path, a queue has a queue name, a CLI has a command. Describe it with a struct in which the route is a plain field:
+Each App has its own entry point: HTTP has a method and a path, a queue has a queue name, a CLI has a command. Describe it with a struct where the chain is a plain field:
 
 ```go
 type Consumer struct {
-    Queue   string             // transport metadata
-    Handler rockhandlers.Route // the chain
+    Queue   string
+    Handler *rockhandlers.Pipeline
 }
 ```
 
-In the App's `Init`:
+In the App's `Init`, validate the descriptions and add your middlewares: `pipeline.Use(a.middlewares...)` — once, at registration.
 
-- **Validate the descriptions** (empty fields, duplicates) and return an error, so the engine won't start the App.
-- **Add app-level middlewares:** `route := c.Handler.With(a.mws...)`. The first one is the outermost, and each `With` wraps everything added before. Do it once at registration, not per request.
-- **Check the types** if the transport can't send everything: `route.ResultType()` and `route.ParamsType()` return the pointer `reflect.Type`s. For example, a CLI that prints text only can refuse a route returning `*rockhttp.File`, which is better at startup than on a request.
-- **Prepare decoding ahead of time** if it is expensive: build the field/tag map once from `ParamsType()`.
+## 2. Decoding (`fill`)
 
-A `Route` is immutable, so `Serve` may be called concurrently.
+`fill` gets a new, empty params struct and fills it.
 
-## Step 2. Decoding (`fill`)
+- It runs inside the chain, after the middlewares, so middlewares see decoding errors and timeouts cover decoding.
+- A plain error from `fill` becomes Invalid with the message `invalid request`; the details stay in the cause, for logs.
+- To tell the client more, return `rockhandlers.Invalid("invalid JSON body")` or an error with fields — without Go type or struct names.
+- Reuse rockhttp's tags where the meaning matches: `json` — body, `header` — headers (HTTP or message), `path`, `query`, `form`. Then one params struct works in several Apps.
 
-`fill` gets a new `P` — a pointer to a zero struct — and fills it.
+## 3. The response
 
-**Where it runs.** Inside the chain, after the middlewares and before `Validate`. So:
-- middlewares (logging, metrics) see decoding errors — no separate reporting channel is needed;
-- `Timeout` covers decoding;
-- a panic in `fill` becomes `Internal` instead of crashing the process;
-- if the context is already done, or a middleware returns an error or `rockhandlers.Done`, `fill` does not run.
+On success `response` is the filled response struct. Send it in your protocol's format by default. Special response types for your protocol (like `rockhttp.File` and `rockhttp.Redirect`) go into the App's package and are handled with a type switch.
 
-**Errors.**
-- A plain `error` from `fill` becomes `Invalid` with the generic message "invalid request"; its text stays in the cause for logs. That is safe but vague.
-- To tell the client more, return a `*rockhandlers.Error` with a clear text without Go type or struct names: `rockhandlers.Invalid("invalid JSON body")`, or `rockhandlers.Invalid("invalid query").WithFields(map[string]string{"page": "must be a number"})`.
-- Return a `*rockhandlers.Error` to control the kind and the message: for example, `rockhandlers.Unauthorized("bad signature")` when verifying a webhook signature.
-- For a body I/O failure the client can't act on, wrap it in a `*rockhandlers.Error` with `KindInternal`, so its text is hidden.
+## 4. Errors
 
-**Tags.** Reuse rockhttp's names where the meaning matches, so one `Params` model works across transports:
-
-| Tag | HTTP | Queue | CLI |
-|---|---|---|---|
-| `json:"x"` | JSON body | JSON message body | JSON from stdin / a flag |
-| `header:"X"` | header | message header (AMQP / Kafka headers) | env var |
-| `query:"x"`, `path:"x"`, `form:"x"` | URL, path, form | — | flags / args |
-
-Support **embedded structs**: reusable steps (auth, tenant) get their data through an embedded model like `BearerAuth` with `header:"Authorization"`.
-
-**Limits.** Bound the body size in decoding itself (`http.MaxBytesReader` and the like); steps already receive a filled struct.
-
-## Step 3. The result
-
-On success, `result` is the route's `R` — a pointer to the filled struct.
-
-- **By default** serialise it in your protocol's format (JSON, protobuf…).
-- **Special result types** express what only your protocol can do: `*rockhttp.File` (stream a file), `*rockhttp.Redirect`. Declare them in the transport package and handle them with a type switch before serialising. A step that returns one is honestly tied to the transport, and that is fine.
-- **An empty struct** (`struct{}`) is the convention for "nothing to send": HTTP answers 204, a queue just acknowledges.
-- **Success status and other response metadata** that belong to the mount point go in its description (`Endpoint.Status`), not in the route.
-- If writing the response fails after its start reached the client, nothing can be fixed; report it through a transport hook (`OnError` in rockhttp).
-
-## Step 4. Errors
-
-Translate the kind, not the error itself — `rockhandlers.KindOf(err)`:
+Translate the kind, not the error itself:
 
 | Kind | HTTP | Queue | CLI |
 |---|---|---|---|
 | `KindNone` (success) | 2xx | ack | 0 |
-| `Invalid` | 400 | reject → DLQ | 2 |
-| `Unauthorized` / `Forbidden` | 401 / 403 | reject → DLQ | 1 |
-| `NotFound` / `Conflict` | 404 / 409 | reject → DLQ | 1 |
-| `Unavailable` | 503 | requeue | 1 |
-| `Timeout` | 504 | requeue or DLQ | 1 |
+| `Invalid`, `Unauthorized`, `Forbidden`, `NotFound`, `Conflict` | 400 / 401 / 403 / 404 / 409 | to the dead-letter queue | 1–2 |
+| `Unavailable`, `Timeout` | 503 / 504 | retry later | 1 |
 | `Canceled` | 499, no body | requeue | 130 |
-| `Internal` | 500 | requeue with a retry limit | 1 |
+| `Internal` | 500 | retry with a limit | 1 |
 
-Rules:
+- Only `rockhandlers.MessageOf(err)` goes to the client; it is empty for Internal — show a generic text.
+- `rockhandlers.FieldsOf(err)` — per-field problems, if the protocol can carry them.
+- `errors.Is(err, rockhandlers.ErrHandlerNotFound)` — the chain is not written yet: HTTP answers `501`.
+- `*rockhandlers.NormalizeError` — the response failed `Normalize`: a server error.
 
-- **Only `rockhandlers.MessageOf(err)` goes to the client.** It returns "" for `Internal`: show a generic text ("internal error"). Never send `err.Error()` to the client — it carries causes meant for logs.
-- **`rockhandlers.FieldsOf(err)`** returns per-field problems; send them if the protocol allows (JSON in HTTP, details in gRPC).
-- **`Canceled` is not a server error:** the client is gone or the app is stopping. Don't write a body; in a queue, requeue the message so it isn't lost.
-- **Unknown kinds** (from future versions) are handled as `Internal`.
-- Logging route errors is a middleware's job, not the transport's.
+## 5. Context and shutdown
 
-## Step 5. Escape hatches through the context
+- The request context comes from the protocol (`r.Context()` in HTTP) or from the App's `Exec`. Pass it to `Run`.
+- Concurrency, limits and prefetch are the App's job.
+- On shutdown, stop taking new work and wait for the work in progress.
 
-When a step must affect the response in a way the result can't express (a cookie, a response header, message priority), or read the raw request, provide functions that work through the context:
+## 6. Tests
 
-```go
-type exchangeKey struct{}
-
-type exchange struct {
-    req     *http.Request
-    cookies []*http.Cookie
-}
-
-// Transport: before Serve.
-ctx = context.WithValue(ctx, exchangeKey{}, &exchange{req: r})
-
-// Public API of the transport: a step calls rockhttp.SetCookie(c, cookie).
-func SetCookie(ctx context.Context, c *http.Cookie) {
-    if x, ok := ctx.Value(exchangeKey{}).(*exchange); ok {
-        x.cookies = append(x.cookies, c)
-    }
-}
-```
-
-A step's `Ctx` is a `context.Context`, so such functions take it directly. Outside a transport call they do nothing (or return nil), so steps stay testable with `rockhandlers.Run`. Apply what was collected when writing the response — both success and error.
-
-## Step 6. Context, concurrency, shutdown
-
-- **The request context** comes from the protocol (`r.Context()` in HTTP, cancelled when the connection drops) or from the App's `Exec` context for a queue. Pass it to `Serve`: cancellation reaches the steps and the database.
-- **Cancellation is cooperative.** rockhandlers doesn't abandon steps in goroutines. It stops the chain between steps, and inside a step everything stops by itself if the step passes the context to blocking calls.
-- **Concurrency is the transport's job:** worker pools, prefetch, a limit on in-flight requests. A single `Ctx` is not safe for concurrent use, but every `Serve` call gets its own.
-- **Shutdown.** When the `Exec` context is cancelled, stop accepting new work and wait for in-flight messages. What happens to the ones that don't finish is up to the protocol: an HTTP server waits within its timeout, a queue returns unacknowledged messages. The App contract is in [rockengine](../rockengine/README.md).
-
-## Step 7. Testing a transport
-
-No broker is needed: build stub routes and check the translation.
+No broker is needed: build stub chains and check the kind translation.
 
 ```go
-func TestKindMapping(t *testing.T) {
-    type P struct{ ID string `json:"id"` }
-    type R struct{}
-    fail := func(err error) rockhandlers.Route {
-        return rockhandlers.Chain("t", func(*rockhandlers.Ctx[*P, *R]) error { return err })
-    }
-    cases := []struct {
-        route rockhandlers.Route
-        want  outcome
-    }{
-        {fail(nil), ack},
-        {fail(rockhandlers.Invalid("bad")), reject},
-        {fail(rockhandlers.Unavailable("down")), requeue},
-        {fail(errors.New("boom")), requeue},
-        {rockhandlers.Chain("p", func(*rockhandlers.Ctx[*P, *R]) error { panic("x") }), requeue},
-    }
-    for _, c := range cases {
-        if got := handle(c.route, message{Body: `{"id":"1"}`}); got != c.want {
-            t.Fatalf("got %v, want %v", got, c.want)
-        }
-    }
+type P struct{}
+func (*P) Validate() error { return nil }
+type R struct{}
+func (*R) Normalize() error { return nil }
+
+fail := func(err error) *rockhandlers.Pipeline {
+    return rockhandlers.Chain(func(*rockhandlers.Ctx, *P, *R) error { return err })
 }
+// fail(nil) → ack, fail(rockhandlers.Invalid("bad")) → reject, fail(errors.New("boom")) → requeue
 ```
-
-Also test:
-- a decoding error (`Invalid` with a clear text);
-- that the `Internal` text is hidden;
-- `Canceled` on an already-cancelled context;
-- embedded structs in `Params`;
-- special result types;
-- that app middlewares see decoding errors too.
-
-## Example: a queue consumer
-
-```go
-func (a *App) handle(ctx context.Context, msg *queue.Message) {
-    route := a.routes[msg.Queue] // prepared in Init: Handler.With(a.mws...)
-    _, err := route.Serve(ctx, func(params any) error {
-        if err := json.Unmarshal(msg.Body, params); err != nil {
-            return fmt.Errorf("invalid JSON body: %v", err) // → Invalid
-        }
-        return bindHeaders(msg.Headers, params) // header tags, embedded structs included
-    })
-    switch rockhandlers.KindOf(err) {
-    case rockhandlers.KindNone:
-        msg.Ack()
-    case rockhandlers.KindUnavailable, rockhandlers.KindTimeout, rockhandlers.KindCanceled, rockhandlers.KindInternal:
-        msg.Requeue()
-    default:
-        msg.Reject() // a bad message: retrying won't help
-    }
-}
-```
-
-This App's `Init`, `Exec` and `Stop` are on the [How to write an App](https://arzab.github.io/gorock/guide/apps) page of the GOROCK docs.
-
-## Checklist
-
-- [ ] A mount-point description with your metadata and a `Handler rockhandlers.Route` field.
-- [ ] `Init`: validate descriptions, `With(mws...)` once, check `ResultType()` if needed.
-- [ ] Decoding only inside `fill`: clear error texts, `*Error` for your own kinds, embedded structs, size limits.
-- [ ] Result: the default format, special types, the empty struct.
-- [ ] Errors by `KindOf`: only `MessageOf` to the client, a generic text for `Internal`, `FieldsOf`, and `Canceled` is not a server error.
-- [ ] Escape hatches through the context, with no effect outside the transport.
-- [ ] The request context goes to `Serve`; concurrency and shutdown are on the App's side.
-- [ ] Tests for kind mapping, decoding errors, panics and cancellation.
