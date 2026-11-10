@@ -52,6 +52,19 @@ type Context interface {
 //	}
 type Middleware func(c Context) error
 
+// Done ends the chain successfully. A step or middleware returns it to skip
+// the rest of the chain — for example on a cache hit:
+//
+//	if cached, ok := cache.Get(c.Params.ID); ok {
+//	    *c.Result = cached
+//	    return rockhandlers.Done
+//	}
+//	return nil // the chain continues
+//
+// Done never leaves the chain: outer links get nil from their Next, and
+// Serve and Run return the Result with a nil error.
+var Done = errors.New("rockhandlers: done") //nolint:staticcheck // a control-flow sentinel like io.EOF, not a failure: the name Done reads right at the call site
+
 // Validator is implemented by Params that validate themselves. Validate runs
 // after the middlewares and the transport's fill, before the first step; a
 // plain error becomes Invalid.
@@ -76,6 +89,7 @@ type Ctx[P, R any] struct {
 	cur   int     // index of the running link; -1 before the chain starts
 	ran   []bool  // per link: Next already started it
 	errs  []error // per link: its result
+	done  bool    // a link returned Done: nothing more runs
 }
 
 // Context methods.
@@ -103,6 +117,11 @@ func (c *Ctx[P, R]) links() int { return len(c.mws) + 1 + len(c.steps) }
 
 // Next runs the next link of the chain and returns its error.
 //
+// A link does not have to call Next: if it returns nil without calling it,
+// the chain continues by itself. Call Next to run code after the rest of the
+// chain (a middleware that logs the error), and return Done to end the chain
+// early with success.
+//
 //   - After the last step it does nothing and returns nil.
 //   - Called again by the same link, it does not rerun anything and returns
 //     the first result.
@@ -125,7 +144,14 @@ func (c *Ctx[P, R]) Next() error {
 	prev := c.cur
 	c.cur = i
 	err := c.run(i)
+	if err == nil && !c.done && !c.ran[i+1] {
+		err = c.Next() // the link returned nil without calling Next: continue
+	}
 	c.cur = prev
+	if errors.Is(err, Done) {
+		c.done = true
+		err = nil
+	}
 	c.errs[i] = err
 	return err
 }

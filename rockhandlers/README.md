@@ -41,7 +41,8 @@ func Create(c *CreateCtx) error { … }
 ```
 
 - `Ctx[P, R]` holds typed `Params`, filled by the transport, and `Result`, which is allocated before the chain and filled by the steps. P and R are pointer-to-struct types.
-- A step that does not call `c.Next()` ends the chain, so an early successful return (for example, a cache hit) is fine.
+- A step that returns `nil` hands control to the next step — calling `c.Next()` is not required. Call it when you need to run code after the rest of the chain.
+- To end the chain early with success (for example, a cache hit), return `rockhandlers.Done`: the remaining steps are skipped, outer middlewares see `nil`, and the Result is returned. A middleware that returns `Done` before the steps skips validation and the steps.
 - A repeated `Next()` returns the first result. `Next()` after the last step returns nil.
 - If `Params` implements `Validate() error`, it runs after the transport has filled `Params` and before the first step: check first, then use. A plain error from it becomes `Invalid`.
 - `Chain` erases the generics. A `Route` is a plain value, so routes of different types fit in one slice.

@@ -8,11 +8,13 @@ All modules are versioned together. Tags are per module (`rockengine/v0.1.0`, `r
 
 | Module | Change | What to do |
 |---|---|---|
+| rockhandlers | A step or middleware that returns `nil` without calling `Next` no longer ends the chain: the chain continues. | Steps that ended the chain early with `return nil` (cache hits, short-circuits) → `return rockhandlers.Done`. |
 | rockservices | A second `Init` of the same catalog returns `ErrAlreadyStarted` instead of initialising every service again. | Call `Init` once. |
 | rockservices | Services are looked up by typed keys. `Add(c, name, ctor, cfg)`, `Get[S](name)` and `GetFrom` are removed. | Replace `const OrdersName = "orders"` + the getter `func Orders() orders.Service { … }` with `var Orders = rockservices.NewKey[orders.Service]("orders")`; `rockservices.Add(c, OrdersName, …)` → `rockservices.Add(c, Orders, …)`; calls `services.Orders()` → `services.Orders.Get()`; `GetFrom[S](c, name)` → `key.From(c)`. |
 
 ### Added
 
+- **rockhandlers:** `Done` — end the chain early with success.
 - **rockservices:** `Key[S]` (`NewKey`, `Name`, `Get`, `From`). `Init` of the default catalog fails if a declared key was never added, so a forgotten registration stops the project at startup.
 - **rockservices:** `ErrAlreadyStarted`. Docs: wire dependencies through the value `Add` returned (never `key.Get()` inside a constructor); tests that swap the default catalog must not use `t.Parallel()`.
 
