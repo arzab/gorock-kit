@@ -142,7 +142,7 @@ The fill function runs inside the chain, after the middlewares and before valida
 
 `ParamsType()` and `ResultType()` let a transport check routes at startup, for example to refuse a result type it cannot send.
 
-Step-by-step guide with a checklist: [Writing a transport](TRANSPORT.md).
+Step-by-step guide with a checklist: [Writing your own App](TRANSPORT.md).
 
 ## Testing
 
