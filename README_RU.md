@@ -64,19 +64,17 @@ func Exec(ctx context.Context) error {
 
 ```go
 // pkg/services/services.go
-const RepositoryName = "repository" // the name is given at registration
+var Repository = rockservices.NewKey[repository.Service]("repository") // typed key
 
 type Configs struct {
     Repository repository.Configs
 }
 
 func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, RepositoryName, repository.NewService, cfg.Repository)
+    rockservices.Add(c, Repository, repository.NewService, cfg.Repository)
 }
 
-func Repository() repository.Service { return rockservices.Get[repository.Service](RepositoryName) }
-
-// где угодно: services.Repository().Insert(ctx, order)
+// где угодно: services.Repository.Get().Insert(ctx, order)
 ```
 
 Куда класть код и почему — [архитектура GOROCK](https://arzab.github.io/gorock/architecture/).
