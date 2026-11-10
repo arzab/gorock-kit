@@ -4,7 +4,7 @@
 
 | Модуль | Описание |
 |---|---|
-| [rockengine](./rockengine) | Жизненный цикл apps: старт в порядке регистрации, упорядоченная graceful-остановка, политики рестарта, перехват паник, таймаут остановки |
+| [rockengine](./rockengine) | Жизненный цикл App: запуск в заданном порядке, остановка по одному в обратном, перехват паник, таймаут остановки, перезапуски по желанию |
 | [rockconfig](./rockconfig) | Один файл конфига (YAML/JSON) → типизированный `Configs`: snake_case, `${ENV:-default}`, значения по умолчанию, проверка обязательных полей и неизвестных ключей |
 | [rockservices](./rockservices) | Слой сервисов: один каталог, который создаёт, хранит по названию, выдаёт, инициализирует и останавливает сервисы `pkg/services` |
 | [rockhandlers](./rockhandlers) | Обработка запросов без привязки к транспорту: цепочка типизированных шагов с `Next`, Locals, middleware, валидацией, перехватом паник и видами ошибок — любой транспорт (HTTP, очередь, CLI) запускает одни и те же маршруты |
@@ -55,9 +55,7 @@ func Exec(ctx context.Context) error {
     }
     defer services.Stop()
 
-    engine := rockengine.NewEngine()
-    apps.Register(engine, cfg.Apps)
-    return engine.Run() // блокирует до SIGINT/SIGTERM или падения App
+    return apps.Run(ctx, cfg.Apps) // rockengine: до SIGINT/SIGTERM или падения App
 }
 ```
 

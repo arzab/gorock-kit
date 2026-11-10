@@ -102,12 +102,12 @@ func (f *fakeApp) waitRunning(t *testing.T) {
 }
 
 // run starts the engine in the background and returns a cancel func and a
-// channel with RunContext's result.
-func run(t *testing.T, e *Engine) (context.CancelFunc, <-chan error) {
+// channel with Run's result.
+func run(t *testing.T, e *Engine, names ...string) (context.CancelFunc, <-chan error) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	res := make(chan error, 1)
-	go func() { res <- e.RunContext(ctx) }()
+	go func() { res <- e.Run(ctx, names...) }()
 	t.Cleanup(cancel)
 	return cancel, res
 }
@@ -118,452 +118,218 @@ func result(t *testing.T, res <-chan error) error {
 	case err := <-res:
 		return err
 	case <-time.After(testTimeout):
-		t.Fatal("RunContext did not return")
+		t.Fatal("Run did not return")
 		return nil
 	}
 }
 
-func waitState(t *testing.T, e *Engine, name string, want State) AppInfo {
-	t.Helper()
-	deadline := time.Now().Add(testTimeout)
-	for {
-		info, err := e.AppStatus(name)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if info.State == want {
-			return info
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: state %q, want %q (err: %v)", name, info.State, want, info.Err)
-		}
-		time.Sleep(time.Millisecond)
-	}
-}
-
-func TestCleanShutdown(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	e := NewEngine().MustRegister("a", a)
-	cancel, res := run(t, e)
-	a.waitRunning(t)
-	cancel()
-	if err := result(t, res); err != nil {
-		t.Fatalf("RunContext: %v", err)
-	}
-	if got := ev.count("a:stop"); got != 1 {
-		t.Fatalf("Stop called %d times, want 1", got)
-	}
-	waitState(t, e, "a", StateStopped)
-}
-
-// 2.1: whatever Exec returns after its ctx is cancelled is a clean stop.
-func TestErrorAfterCancelIsCleanStop(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	a.execFn = func(ctx context.Context, _ int) error {
-		<-ctx.Done()
-		return http.ErrServerClosed
-	}
-	var fatal atomic.Int32
-	e := NewEngine().WithFatalHandler(func(string, error) { fatal.Add(1) }).MustRegister("a", a)
-	cancel, res := run(t, e)
-	a.waitRunning(t)
-	cancel()
-	if err := result(t, res); err != nil {
-		t.Fatalf("RunContext: %v", err)
-	}
-	info := waitState(t, e, "a", StateStopped)
-	if info.Retries != 0 || fatal.Load() != 0 {
-		t.Fatalf("clean shutdown counted as failure: retries=%d fatal=%d", info.Retries, fatal.Load())
-	}
-}
-
-// context.Canceled from Exec without the engine cancelling is an app error.
-func TestCanceledWithoutCancelIsFailure(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	a.execFn = func(context.Context, int) error { return context.Canceled }
-	e := NewEngine().WithStopOnFatal(false).MustRegister("a", a)
-	_, _ = run(t, e)
-	info := waitState(t, e, "a", StateFailed)
-	if !errors.Is(info.Err, context.Canceled) {
-		t.Fatalf("err = %v", info.Err)
-	}
-}
-
-func TestRestartPolicy(t *testing.T) {
-	boom := errors.New("boom")
-	tests := []struct {
-		name       string
-		maxRetries int
-		failures   int // Exec fails this many times, then blocks
-		wantState  State
-		wantExecs  int
-	}{
-		{"no restart by default", 0, 1, StateFailed, 1},
-		{"restarts up to limit then succeeds", 2, 2, StateRunning, 3},
-		{"exceeds limit", 2, 3, StateFailed, 3},
-		{"unlimited", -1, 5, StateRunning, 6},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ev := &events{}
-			a := newFake("a", ev)
-			a.execFn = func(ctx context.Context, call int) error {
-				if call <= tt.failures {
-					return boom
-				}
-				<-ctx.Done()
-				return ctx.Err()
-			}
-			e := NewEngine().WithStopOnFatal(false).MustRegister("a", a, RestartPolicy{MaxRetries: tt.maxRetries})
-			cancel, res := run(t, e)
-			for i := 0; i < tt.wantExecs; i++ {
-				a.waitRunning(t)
-			}
-			waitState(t, e, "a", tt.wantState)
-			if got := int(a.execs.Load()); got != tt.wantExecs {
-				t.Fatalf("Exec called %d times, want %d", got, tt.wantExecs)
-			}
-			// Every Init is matched by exactly one Stop by the end.
-			cancel()
-			_ = result(t, res)
-			if inits, stops := ev.count("a:init"), ev.count("a:stop"); inits != stops {
-				t.Fatalf("Init called %d times but Stop %d times", inits, stops)
-			}
-		})
-	}
-}
-
-// 2.2: a panic in Exec goes through the restart policy.
-func TestPanicInExecIsRestarted(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	a.execFn = func(ctx context.Context, call int) error {
-		if call == 1 {
-			panic("kaboom")
-		}
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	e := NewEngine().MustRegister("a", a, RestartPolicy{MaxRetries: 1})
-	cancel, res := run(t, e)
-	a.waitRunning(t)
-	a.waitRunning(t)
-	info := waitState(t, e, "a", StateRunning)
-	if info.Retries != 1 || !strings.Contains(info.Err.Error(), "kaboom") {
-		t.Fatalf("retries=%d err=%v", info.Retries, info.Err)
-	}
-	cancel()
-	if err := result(t, res); err != nil {
-		t.Fatalf("RunContext: %v", err)
-	}
-}
-
-func TestPanicInInit(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	b := newFake("b", ev)
-	b.initFn = func(context.Context, int) error { panic("bad init") }
-	e := NewEngine().MustRegister("a", a).MustRegister("b", b)
-	_, res := run(t, e)
-	err := result(t, res)
-	if err == nil || !strings.Contains(err.Error(), `app "b": init`) {
-		t.Fatalf("err = %v", err)
-	}
-	if ev.count("a:stop") != 1 || ev.count("b:stop") != 0 {
-		t.Fatalf("expected only a to be stopped, log: %v", ev.snapshot())
-	}
-}
-
-// 2.6: a panic in Stop does not crash shutdown and is reported.
-func TestPanicInStop(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	a.stopFn = func() []error { panic("bad stop") }
-	e := NewEngine().MustRegister("a", a)
-	cancel, res := run(t, e)
-	a.waitRunning(t)
-	cancel()
-	err := result(t, res)
-	if err == nil || !strings.Contains(err.Error(), "bad stop") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-// 2.3: ResetAfter makes MaxRetries limit crash loops, not lifetime failures.
-func TestResetAfter(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	var gate = make(chan struct{})
-	a.execFn = func(ctx context.Context, call int) error {
-		if call == 3 {
-			<-ctx.Done()
-			return ctx.Err()
-		}
-		select { // each run lasts long enough to qualify for a reset
-		case <-gate:
-		case <-time.After(20 * time.Millisecond):
-		}
-		return errors.New("fail")
-	}
-	e := NewEngine().WithStopOnFatal(false).MustRegister("a", a, RestartPolicy{MaxRetries: 1, ResetAfter: 10 * time.Millisecond})
-	_, _ = run(t, e)
-	for i := 0; i < 3; i++ {
-		a.waitRunning(t)
-	}
-	info := waitState(t, e, "a", StateRunning)
-	if info.Retries != 1 {
-		t.Fatalf("retries = %d, want 1 (reset before each failure)", info.Retries)
-	}
-}
-
-func TestRestartOnExit(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	a.execFn = func(ctx context.Context, call int) error {
-		if call == 1 {
-			return nil
-		}
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	e := NewEngine().MustRegister("a", a, RestartPolicy{RestartOnExit: true})
-	_, _ = run(t, e)
-	a.waitRunning(t)
-	a.waitRunning(t)
-	info := waitState(t, e, "a", StateRunning)
-	if info.Retries != 0 {
-		t.Fatalf("clean exit must not count as retry, got %d", info.Retries)
-	}
-}
-
-// 2.4: apps are stopped one at a time in reverse order; each app's Exec has
-// finished before the previous app's context is cancelled.
-func TestOrderedShutdown(t *testing.T) {
-	ev := &events{}
-	apps := []*fakeApp{newFake("db", ev), newFake("bus", ev), newFake("http", ev)}
-	e := NewEngine()
-	for _, a := range apps {
-		e.MustRegister(a.name, a)
-	}
-	cancel, res := run(t, e)
-	for _, a := range apps {
-		a.waitRunning(t)
-	}
-	cancel()
-	if err := result(t, res); err != nil {
-		t.Fatal(err)
-	}
-
-	var shutdown []string
-	for _, s := range ev.snapshot() {
-		if strings.HasSuffix(s, ":stop") || strings.HasSuffix(s, ":exec-done") {
-			shutdown = append(shutdown, s)
+func index(log []string, s string) int {
+	for i, v := range log {
+		if v == s {
+			return i
 		}
 	}
-	// Within one app, Stop and exec-done race (cancel happens first), so
-	// compare per-app groups: all of http's events, then bus, then db.
-	var groups []string
-	for _, s := range shutdown {
-		name := strings.SplitN(s, ":", 2)[0]
-		if len(groups) == 0 || groups[len(groups)-1] != name {
-			groups = append(groups, name)
-		}
-	}
-	want := []string{"http", "bus", "db"}
-	if fmt.Sprint(groups) != fmt.Sprint(want) {
-		t.Fatalf("shutdown order %v, want %v (events: %v)", groups, want, shutdown)
-	}
+	return -1
 }
 
-// 2.5: a hanging Stop is bounded by the shutdown timeout and named in the error.
-func TestShutdownTimeoutCoversStop(t *testing.T) {
+func TestOrderedStartAndShutdown(t *testing.T) {
 	ev := &events{}
-	a := newFake("db", ev)
-	b := newFake("bot", ev)
-	release := make(chan struct{})
-	defer close(release)
-	b.stopFn = func() []error { <-release; return nil }
-	e := NewEngine().WithShutdownTimeout(50*time.Millisecond).MustRegister("db", a).MustRegister("bot", b)
-	cancel, res := run(t, e)
+	a, b := newFake("a", ev), newFake("b", ev)
+	cancel, res := run(t, New(map[string]App{"a": a, "b": b}), "a", "b")
 	a.waitRunning(t)
 	b.waitRunning(t)
 	cancel()
-	err := result(t, res)
-	if err == nil || !strings.Contains(err.Error(), `while stopping app "bot"`) {
-		t.Fatalf("err = %v", err)
+	if err := result(t, res); err != nil {
+		t.Fatalf("Run = %v", err)
 	}
-}
-
-// 2.7: by default a failed app shuts the engine down and RunContext reports it.
-func TestStopOnFatalDefault(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	b := newFake("b", ev)
-	b.execFn = func(context.Context, int) error { return errors.New("port in use") }
-	e := NewEngine().MustRegister("a", a).MustRegister("b", b)
-	_, res := run(t, e)
-	err := result(t, res)
-	if err == nil || !strings.Contains(err.Error(), `app "b" failed`) || !strings.Contains(err.Error(), "port in use") {
-		t.Fatalf("err = %v", err)
+	log := ev.snapshot()
+	if index(log, "a:init") > index(log, "b:init") {
+		t.Fatalf("init order: %v", log)
+	}
+	// b stops first and fully (its Exec returns) before a is touched
+	if index(log, "b:exec-done") > index(log, "a:stop") {
+		t.Fatalf("shutdown order: %v", log)
 	}
 	if ev.count("a:stop") != 1 || ev.count("b:stop") != 1 {
-		t.Fatalf("each app must be stopped once, log: %v", ev.snapshot())
+		t.Fatalf("Stop called more than once: %v", log)
 	}
 }
 
-func TestStopOnFatalDisabled(t *testing.T) {
+func TestErrorAfterCancelIsCleanStop(t *testing.T) {
 	ev := &events{}
-	a := newFake("a", ev)
-	b := newFake("b", ev)
-	b.execFn = func(context.Context, int) error { return errors.New("boom") }
-	var fatalName atomic.Value
-	e := NewEngine().WithStopOnFatal(false).
-		WithFatalHandler(func(name string, _ error) { fatalName.Store(name) }).
-		MustRegister("a", a).MustRegister("b", b)
-	cancel, res := run(t, e)
-	waitState(t, e, "b", StateFailed)
-	waitState(t, e, "a", StateRunning)
-	// 2.8: the failed app is stopped right away, not at shutdown.
-	if ev.count("b:stop") != 1 {
-		t.Fatalf("failed app not stopped, log: %v", ev.snapshot())
+	srv := newFake("http", ev)
+	srv.execFn = func(ctx context.Context, _ int) error {
+		<-ctx.Done()
+		return http.ErrServerClosed
 	}
-	if fatalName.Load() != "b" {
-		t.Fatalf("fatal handler got %v", fatalName.Load())
-	}
+	cancel, res := run(t, New(map[string]App{"http": srv}), "http")
+	srv.waitRunning(t)
 	cancel()
 	if err := result(t, res); err != nil {
-		t.Fatalf("RunContext: %v", err)
-	}
-	if ev.count("b:stop") != 1 {
-		t.Fatalf("Stop called again for failed app, log: %v", ev.snapshot())
+		t.Fatalf("Run = %v", err)
 	}
 }
 
-func TestPerAppOnFatalOverridesEngineHandler(t *testing.T) {
+func TestExecFailureStopsEverything(t *testing.T) {
 	ev := &events{}
-	a := newFake("a", ev)
-	a.execFn = func(context.Context, int) error { return errors.New("boom") }
-	var engineCalled, appCalled atomic.Bool
-	e := NewEngine().
-		WithFatalHandler(func(string, error) { engineCalled.Store(true) }).
-		MustRegister("a", a, RestartPolicy{OnFatal: func(error) { appCalled.Store(true) }})
-	_, res := run(t, e)
-	_ = result(t, res)
-	if !appCalled.Load() || engineCalled.Load() {
-		t.Fatalf("appCalled=%v engineCalled=%v", appCalled.Load(), engineCalled.Load())
+	a, b := newFake("a", ev), newFake("b", ev)
+	b.execFn = func(context.Context, int) error { return errors.New("port busy") }
+	_, res := run(t, New(map[string]App{"a": a, "b": b}), "a", "b")
+	err := result(t, res)
+	if err == nil || !strings.Contains(err.Error(), `app "b" failed: port busy`) {
+		t.Fatalf("Run = %v", err)
+	}
+	if ev.count("a:stop") != 1 || ev.count("b:stop") != 1 {
+		t.Fatalf("stops: %v", ev.snapshot())
 	}
 }
 
-func TestReinitFailure(t *testing.T) {
+func TestPanics(t *testing.T) {
 	ev := &events{}
-	a := newFake("a", ev)
-	a.initFn = func(_ context.Context, call int) error {
-		if call == 2 {
-			return errors.New("db gone")
-		}
-		return nil
+	p := newFake("p", ev)
+	p.execFn = func(context.Context, int) error { panic("exec boom") }
+	if err := result(t, second(run(t, New(map[string]App{"p": p}), "p"))); err == nil || !strings.Contains(err.Error(), "exec boom") {
+		t.Fatalf("exec panic: %v", err)
 	}
-	a.execFn = func(context.Context, int) error { return errors.New("boom") }
-	e := NewEngine().WithStopOnFatal(false).MustRegister("a", a, RestartPolicy{MaxRetries: 5})
-	_, _ = run(t, e)
-	info := waitState(t, e, "a", StateFailed)
-	if !strings.Contains(info.Err.Error(), "re-init failed: db gone") {
-		t.Fatalf("err = %v", info.Err)
+
+	q := newFake("q", ev)
+	q.initFn = func(context.Context, int) error { panic("init boom") }
+	if err := New(map[string]App{"q": q}).Run(context.Background(), "q"); err == nil || !strings.Contains(err.Error(), "init boom") {
+		t.Fatalf("init panic: %v", err)
 	}
-}
 
-func TestStopAppAndRestartApp(t *testing.T) {
-	ev := &events{}
-	a := newFake("a", ev)
-	e := NewEngine().MustRegister("a", a)
-	cancel, res := run(t, e)
-	a.waitRunning(t)
-
-	if err := e.StopApp("a"); err != nil {
-		t.Fatal(err)
-	}
-	waitState(t, e, "a", StateStopped)
-
-	if err := e.RestartApp("a"); err != nil {
-		t.Fatal(err)
-	}
-	a.waitRunning(t)
-	waitState(t, e, "a", StateRunning)
-
+	s := newFake("s", ev)
+	s.stopFn = func() []error { panic("stop boom") }
+	cancel, res := run(t, New(map[string]App{"s": s}), "s")
+	s.waitRunning(t)
 	cancel()
-	if err := result(t, res); err != nil {
-		t.Fatal(err)
-	}
-	if inits, stops := ev.count("a:init"), ev.count("a:stop"); inits != 2 || stops != 2 {
-		t.Fatalf("inits=%d stops=%d, want 2/2; log: %v", inits, stops, ev.snapshot())
+	if err := result(t, res); err == nil || !strings.Contains(err.Error(), "stop boom") {
+		t.Fatalf("stop panic: %v", err)
 	}
 }
 
-func TestRestartAppWhenNotRunning(t *testing.T) {
-	e := NewEngine().MustRegister("a", newFake("a", &events{}))
-	if err := e.RestartApp("a"); err == nil {
-		t.Fatal("expected error")
+func second(_ context.CancelFunc, res <-chan error) <-chan error { return res }
+
+func TestInitFailureRollsBack(t *testing.T) {
+	ev := &events{}
+	a, b, c := newFake("a", ev), newFake("b", ev), newFake("c", ev)
+	b.initFn = func(context.Context, int) error { return errors.New("no db") }
+	err := New(map[string]App{"a": a, "b": b, "c": c}).Run(context.Background(), "a", "b", "c")
+	if err == nil || !strings.Contains(err.Error(), `app "b": init: no db`) {
+		t.Fatalf("Run = %v", err)
+	}
+	if got := fmt.Sprint(ev.snapshot()); got != "[a:init b:init a:stop]" {
+		t.Fatalf("events: %s", got)
 	}
 }
 
-func TestRestartAppPanicInInit(t *testing.T) {
+func TestRestarts(t *testing.T) {
 	ev := &events{}
 	a := newFake("a", ev)
-	a.initFn = func(_ context.Context, call int) error {
-		if call == 2 {
-			panic("bad reinit")
+	a.execFn = func(ctx context.Context, n int) error {
+		if n <= 2 {
+			return errors.New("lost connection")
 		}
-		return nil
+		<-ctx.Done()
+		return ctx.Err()
 	}
-	e := NewEngine().MustRegister("a", a)
-	_, _ = run(t, e)
-	a.waitRunning(t)
-	err := e.RestartApp("a")
-	if err == nil || !strings.Contains(err.Error(), "bad reinit") {
-		t.Fatalf("err = %v", err)
-	}
-}
-
-func TestRegisterValidation(t *testing.T) {
-	e := NewEngine()
-	if _, err := e.Register("a", nil); err == nil {
-		t.Fatal("nil app accepted")
-	}
-	e.MustRegister("a", newFake("a", &events{}))
-	if _, err := e.Register("a", newFake("a", &events{})); err == nil {
-		t.Fatal("duplicate name accepted")
-	}
-}
-
-func TestRunTwiceConcurrently(t *testing.T) {
-	a := newFake("a", &events{})
-	e := NewEngine().MustRegister("a", a)
-	_, _ = run(t, e)
-	a.waitRunning(t)
-	if err := e.RunContext(context.Background()); err == nil {
-		t.Fatal("second RunContext must fail while running")
-	}
-}
-
-// Stress: shutdown racing with a crash-looping app must not deadlock or
-// leave an Init without a matching Stop.
-func TestShutdownDuringRestartLoop(t *testing.T) {
-	for i := 0; i < 50; i++ {
-		ev := &events{}
-		a := newFake("a", ev)
-		a.execFn = func(context.Context, int) error { return errors.New("crash") }
-		e := NewEngine().MustRegister("a", a, RestartPolicy{MaxRetries: -1})
-		cancel, res := run(t, e)
+	cancel, res := run(t, New(map[string]App{"a": a}).WithRestarts(2, time.Millisecond), "a")
+	for range 3 {
 		a.waitRunning(t)
-		cancel()
-		if err := result(t, res); err != nil {
-			t.Fatalf("iteration %d: %v", i, err)
-		}
-		if inits, stops := ev.count("a:init"), ev.count("a:stop"); inits != stops {
-			t.Fatalf("iteration %d: inits=%d stops=%d", i, inits, stops)
-		}
 	}
+	cancel()
+	if err := result(t, res); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+	if a.inits.Load() != 3 || ev.count("a:stop") != 3 {
+		t.Fatalf("inits %d, events %v", a.inits.Load(), ev.snapshot())
+	}
+}
+
+func TestRestartsExhausted(t *testing.T) {
+	ev := &events{}
+	a := newFake("a", ev)
+	a.execFn = func(context.Context, int) error { return errors.New("down") }
+	_, res := run(t, New(map[string]App{"a": a}).WithRestarts(2, 0), "a")
+	if err := result(t, res); err == nil || !strings.Contains(err.Error(), `app "a" failed: down`) {
+		t.Fatalf("Run = %v", err)
+	}
+	if a.execs.Load() != 3 {
+		t.Fatalf("execs = %d, want 3", a.execs.Load())
+	}
+
+	b := newFake("b", ev)
+	b.execFn = func(context.Context, int) error { return errors.New("down") }
+	b.initFn = func(_ context.Context, n int) error {
+		if n > 1 {
+			return errors.New("still down")
+		}
+		return nil
+	}
+	_, res = run(t, New(map[string]App{"b": b}).WithRestarts(5, 0), "b")
+	if err := result(t, res); err == nil || !strings.Contains(err.Error(), `app "b": restart: init: still down`) {
+		t.Fatalf("restart init: %v", err)
+	}
+}
+
+// An Exec that returns nil before shutdown just ends; the engine goes on.
+func TestCleanExitKeepsEngineRunning(t *testing.T) {
+	ev := &events{}
+	job, srv := newFake("job", ev), newFake("srv", ev)
+	job.execFn = func(context.Context, int) error { return nil }
+	cancel, res := run(t, New(map[string]App{"job": job, "srv": srv}), "job", "srv")
+	srv.waitRunning(t)
+	select {
+	case err := <-res:
+		t.Fatalf("engine stopped after a clean exit: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	cancel()
+	if err := result(t, res); err != nil {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+func TestShutdownTimeoutNamesApp(t *testing.T) {
+	ev := &events{}
+	release := make(chan struct{})
+	defer close(release)
+	slow := newFake("slow", ev)
+	slow.stopFn = func() []error { <-release; return nil }
+	cancel, res := run(t, New(map[string]App{"slow": slow}).WithShutdownTimeout(50*time.Millisecond), "slow")
+	slow.waitRunning(t)
+	cancel()
+	if err := result(t, res); err == nil || !strings.Contains(err.Error(), `while stopping app "slow"`) {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+func TestStopErrorsAreReturned(t *testing.T) {
+	ev := &events{}
+	a := newFake("a", ev)
+	a.stopFn = func() []error { return []error{errors.New("flush failed"), nil} }
+	cancel, res := run(t, New(map[string]App{"a": a}), "a")
+	a.waitRunning(t)
+	cancel()
+	if err := result(t, res); err == nil || !strings.Contains(err.Error(), `app "a": stop: flush failed`) {
+		t.Fatalf("Run = %v", err)
+	}
+}
+
+func TestMisuse(t *testing.T) {
+	mustPanic := func(want string, fn func()) {
+		t.Helper()
+		defer func() {
+			if r := recover(); r == nil || !strings.Contains(fmt.Sprint(r), want) {
+				t.Fatalf("panic = %v, want %q", r, want)
+			}
+		}()
+		fn()
+	}
+	ev := &events{}
+	mustPanic("empty name", func() { New(map[string]App{"": newFake("x", ev)}) })
+	mustPanic(`app "x" is nil`, func() { New(map[string]App{"x": nil}) })
+	e := New(map[string]App{"a": newFake("a", ev)})
+	mustPanic(`app "nope" not found`, func() { _ = e.Run(context.Background(), "nope") })
+	mustPanic(`app "a" listed twice`, func() { _ = e.Run(context.Background(), "a", "a") })
 }

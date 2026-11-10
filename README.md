@@ -4,7 +4,7 @@ The core of [GOROCK](https://arzab.github.io/gorock/) — the structural pieces 
 
 | Module | Description |
 |---|---|
-| [rockengine](./rockengine) | Apps lifecycle: start in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
+| [rockengine](./rockengine) | Apps lifecycle: start in the given order, stop one by one in reverse, panic recovery, shutdown timeout, optional restarts |
 | [rockconfig](./rockconfig) | One config file (YAML/JSON) → typed `Configs`: snake_case mapping, `${ENV:-default}`, defaults, required fields and unknown-key checks |
 | [rockservices](./rockservices) | Services layer: one catalog that creates, stores by name, hands out, initialises and stops the services of `pkg/services` |
 | [rockhandlers](./rockhandlers) | Transport-independent request handling: a chain of typed steps with `Next`, Locals, middlewares, validation, panic recovery and error kinds — any transport (HTTP, queue, CLI) runs the same routes |
@@ -55,9 +55,7 @@ func Exec(ctx context.Context) error {
     }
     defer services.Stop()
 
-    engine := rockengine.NewEngine()
-    apps.Register(engine, cfg.Apps)
-    return engine.Run() // blocks until SIGINT/SIGTERM or an app fails
+    return apps.Run(ctx, cfg.Apps) // rockengine: until SIGINT/SIGTERM or an App fails
 }
 ```
 

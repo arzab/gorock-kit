@@ -1,198 +1,63 @@
 # rockengine
 
-App lifecycle orchestration engine for Go.
+The App engine of a GOROCK project: HTTP servers, queue consumers, schedulers, bots. It starts them in the order you give, waits for a signal, context cancellation or an App failure, and stops them one by one in reverse order. Standard library only.
 
-## Overview
-
-`rockengine` manages the lifecycle of multiple named applications: sequential initialisation, concurrent execution, per-app restart policies, and graceful shutdown.
-
-**App lifecycle:**
-
-```
-Init → Exec → Stop
-```
-
-- **Init** — called sequentially in registration order; sets up resources.
-- **Exec** — runs concurrently in a goroutine; should respect `ctx` cancellation.
-- **Stop** — called on shutdown; must unblock a blocking `Exec` and wait for in-flight work.
-
-## Implementing App
+## App
 
 ```go
 type App interface {
-    Init(ctx context.Context) error
-    Exec(ctx context.Context) error
-    Stop() []error
+    Init(ctx context.Context) error // prepare: connections, routes
+    Exec(ctx context.Context) error // work until ctx is cancelled
+    Stop() []error                  // unblock Exec and wait for work in progress
 }
 ```
 
-**Example:**
+- **`Exec`**, when `ctx` is cancelled, stops taking new work, finishes what it started and returns. Whatever it returns after cancellation is a clean stop.
+- **`Stop`** is called right after the context is cancelled, while `Exec` may still run. It must gracefully unblock a blocking `Exec` (an HTTP server). The engine calls `Stop` at most once per successful `Init` — also when `Exec` never ran, so `Stop` must not wait for `Exec`.
+
+## Running
 
 ```go
-type WorkerApp struct {
-    ticker *time.Ticker
-    done   chan struct{}
-}
-
-func (a *WorkerApp) Init(_ context.Context) error {
-    a.ticker = time.NewTicker(time.Second)
-    a.done = make(chan struct{})
-    return nil
-}
-
-func (a *WorkerApp) Exec(ctx context.Context) error {
-    for {
-        select {
-        case <-ctx.Done():
-            return nil
-        case <-a.ticker.C:
-            fmt.Println("tick")
-        }
-    }
-}
-
-func (a *WorkerApp) Stop() []error {
-    a.ticker.Stop()
-    close(a.done)
-    return nil
-}
-```
-
-## Quick Start
-
-```go
-package main
-
-import (
-    "log"
-    "github.com/arzab/gorock-kit/rockengine"
-)
-
-func main() {
-    rockengine.Register("worker", &WorkerApp{})
-    rockengine.Register("http",   &HTTPApp{})
-
-    if err := rockengine.Run(); err != nil {
-        log.Fatal(err)
-    }
-}
-```
-
-`Run` blocks until `SIGINT` / `SIGTERM` is received (or an app fails, see below), then gracefully stops all apps in reverse registration order.
-
-## Restart Policy
-
-By default, an app whose `Exec` returns an error (or panics) is not restarted: it is marked as `failed`, its `Stop` is called, and the **whole engine shuts down** — `Run` returns an error naming the app. This lets an orchestrator (systemd, Kubernetes) restart a process that lost a component instead of leaving it half-alive.
-
-To enable automatic restarts:
-
-```go
-rockengine.Register("worker", &WorkerApp{}, rockengine.RestartPolicy{
-    MaxRetries: -1,               // -1 = unlimited, 0 = no restart (default), N = up to N times
-    Delay:      2 * time.Second,
-    ResetAfter: time.Minute,      // a run that lasted >=1m resets the retry counter; 0 = never reset
-    OnFatal: func(err error) {   // called when the app is marked failed (overrides engine-level handler)
-        log.Printf("worker is dead: %v", err)
-    },
-})
-```
-
-- A restart is `Stop → Delay → Init → Exec`. Every successful `Init` is matched by exactly one `Stop`.
-- A panic in `Exec` counts as a failure and follows the policy. Panics in `Init`, `Stop` and fatal handlers are recovered and reported as errors.
-- Whatever `Exec` returns after its `ctx` was cancelled (`nil`, `ctx.Err()`, `http.ErrServerClosed`, ...) is a clean stop, never a failure.
-- Without `ResetAfter`, `MaxRetries` counts failures over the whole process lifetime.
-
-To keep the engine running when an app fails, use `SetStopOnFatal(false)` / `WithStopOnFatal(false)` and observe failures via the fatal handler or `AppStatuses`.
-
-## Custom Engine
-
-For more control, create an `Engine` directly:
-
-```go
-engine := rockengine.NewEngine().
-    WithShutdownTimeout(15 * time.Second).
-    WithStopOnFatal(false). // keep other apps running when one fails
-    WithFatalHandler(func(name string, err error) {
-        log.Printf("app %s is dead: %v", name, err)
+// cmd/apps/apps.go
+func Run(ctx context.Context, cfg Configs) error {
+    engine := rockengine.New(map[string]rockengine.App{
+        "bus":  rockbus.NewApp(cfg.Bus),
+        "http": rockhttp.New(cfg.HTTP, httpEndpoints()...),
     })
-
-engine.Register("worker", &WorkerApp{}, rockengine.RestartPolicy{MaxRetries: 3, Delay: time.Second})
-engine.Register("http",   &HTTPApp{})
-
-if err := engine.Run(); err != nil {
-    log.Fatal(err)
+    return engine.Run(ctx, "bus", "http") // http starts last and stops first
 }
 ```
-
-## Orchestration
-
-Individual apps can be controlled at runtime without affecting others:
 
 ```go
-// Stop a single app
-rockengine.StopApp("worker")
-
-// Restart a single app (Stop → Init → Exec)
-rockengine.RestartApp("worker")
-
-// Inspect status
-info, err := rockengine.AppStatus("worker")
-fmt.Println(info.State, info.Retries, info.Err)
-
-// Inspect all apps
-for _, info := range rockengine.AppStatuses() {
-    fmt.Printf("%s: %s\n", info.Name, info.State)
+// cmd/main
+if err := services.Init(ctx, cfg.Services); err != nil {
+    return err
 }
+defer services.Stop()
+return apps.Run(ctx, cfg.Apps)
 ```
 
-## App States
+## How `Run` works
 
-| State        | Description                                      |
-|--------------|--------------------------------------------------|
-| `idle`       | Registered, not yet started                      |
-| `running`    | `Exec` is active                                 |
-| `restarting` | Waiting between restart attempts                 |
-| `stopped`    | Stopped cleanly                                  |
-| `failed`     | Exceeded restart limit or re-`Init` failed       |
+1. **Start:** `Init` of each App in the given order. If one fails, the ones already initialised are stopped in reverse order and `Run` returns an error naming the App.
+2. **Work:** `Exec` of each App in its own goroutine.
+3. **Stop** — on `SIGINT`/`SIGTERM`, `ctx` cancellation or an App failure. Apps stop one by one in reverse order: cancel its context → `Stop` → wait for `Exec`. Bounded by a timeout (30s, `WithShutdownTimeout`) that names the hanging App.
+4. **Result:** the reason (an App failure) joined with every `Stop` error. A clean stop returns `nil`.
 
-## API Reference
+**An App failure** is its `Exec` returning an error or panicking while its context was not cancelled. An `Exec` that returns `nil` before shutdown just ends; the other Apps go on.
 
-### Package-level (default engine)
+## Restarts
 
-| Function                                          | Description                              |
-|---------------------------------------------------|------------------------------------------|
-| `Register(name, app, policy?)`                   | Register an app                          |
-| `Run() error`                                     | Start and block                          |
-| `RunContext(ctx) error`                           | Start with a custom context              |
-| `StopApp(name) error`                             | Stop a single app                        |
-| `RestartApp(name) error`                          | Restart a single app                     |
-| `AppStatus(name) (AppInfo, error)`                | Status of one app                        |
-| `AppStatuses() []AppInfo`                         | Status of all apps                       |
-| `Shutdown() []error`                              | Stop all apps                            |
-| `SetShutdownTimeout(d)`                           | Set global shutdown timeout (default 30s)|
-| `SetFatalHandler(fn)`                             | Set handler for fatal app failures       |
-| `SetStopOnFatal(bool)`                            | Shut down the engine when an app fails (default `true`) |
+By default the first App failure stops everything, and the orchestrator (Kubernetes, systemd, Docker) restarts the process. Without one:
 
-### Engine methods
+```go
+rockengine.New(apps).WithRestarts(3, time.Second) // Stop → pause → Init → Exec, up to 3 times
+```
 
-Same as above, plus:
+When the restarts run out, or `Init` fails during a restart, the engine stops everything. Reconnecting to a broker after a network drop is better done inside the App itself, in its `Exec`.
 
-| Method                        | Description                     |
-|-------------------------------|---------------------------------|
-| `NewEngine() *Engine`         | Create a new engine             |
-| `WithShutdownTimeout(d)`      | Set shutdown timeout            |
-| `WithFatalHandler(fn)`        | Set fatal handler               |
-| `WithStopOnFatal(bool)`       | Shut down on app failure (default `true`) |
+## Rules
 
-## Shutdown Contract
-
-Apps are stopped **one at a time** in reverse registration order. For each app:
-
-1. its `ctx` is cancelled — `Exec` should stop accepting new work and finish in-flight operations;
-2. `Stop` is called right after, to unblock a blocking `Exec` (e.g. `server.Shutdown`);
-3. the engine waits for `Exec` to return before moving on to the previous app.
-
-So an HTTP server registered after the event bus is fully stopped before the bus is touched.
-
-- `Stop` must not forcefully cut ongoing work. The shutdown timeout (default 30s) covers the whole sequence including `Stop` calls; on timeout `Run` returns an error naming the app that hung.
-- The engine calls `Stop` at most once per successful `Init`, but `Stop` may run concurrently with `Exec` — it must be safe for that.
+- `New` panics on an empty name or a nil App; `Run` panics on an unknown or repeated name. Wiring bugs show at startup.
+- Panics in `Init`, `Exec` and `Stop` become errors.
+- App contexts don't inherit the given `ctx`'s cancellation directly: the engine cancels them itself, one by one, in reverse order.

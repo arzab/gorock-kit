@@ -61,9 +61,7 @@ if err := services.Init(ctx, cfg.Services); err != nil {
 }
 defer services.Stop()
 
-engine := rockengine.NewEngine()
-apps.Register(engine, cfg.Apps)
-return engine.Run()
+return apps.Run(ctx, cfg.Apps) // rockengine
 ```
 
 ```go
