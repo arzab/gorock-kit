@@ -4,9 +4,9 @@ The core of [GOROCK](https://arzab.github.io/gorock/) — the structural pieces 
 
 | Module | Description |
 |---|---|
-| [rockengine](./rockengine) | Apps lifecycle: start in registration order, ordered graceful shutdown, restart policies, panic recovery, shutdown timeout |
+| [rockengine](./rockengine) | Apps lifecycle: start in the given order, stop one by one in reverse, panic recovery, shutdown timeout, optional restarts |
 | [rockconfig](./rockconfig) | One config file (YAML/JSON) → typed `Configs`: snake_case mapping, `${ENV:-default}`, defaults, required fields and unknown-key checks |
-| [rockservices](./rockservices) | Services layer: one catalog that creates, stores under typed keys, hands out, initialises and stops the services of `pkg/services` |
+| [rockservices](./rockservices) | Services layer: one catalog that creates, stores by name, hands out, initialises and stops the services of `pkg/services` |
 | [rockhandlers](./rockhandlers) | Transport-independent request handling: a chain of typed steps with `Next`, Locals, middlewares, validation, panic recovery and error kinds — any transport (HTTP, queue, CLI) runs the same routes |
 
 Go 1.26+. `rockengine`, `rockservices` and `rockhandlers` use only the standard library; `rockconfig` adds `gopkg.in/yaml.v3`.
@@ -16,7 +16,7 @@ HTTP server, PostgreSQL/Redis services, logger, event bus, scheduler and Telegra
 ## How they fit
 
 ```
-cmd/main:  rockconfig → rockservices.Init → rockengine.Run (apps) → rockservices.Stop
+cmd/main:  rockconfig → services.Init → rockengine.Run (apps) → services.Stop
 ```
 
 Services are a layer of their own: they start before the apps and stop after them. The engine runs only apps:
@@ -50,31 +50,33 @@ func Exec(ctx context.Context) error {
         return err
     }
 
-    services.Register(rockservices.Default(), cfg.Services)
-    if err := rockservices.Init(ctx); err != nil {
+    if err := services.Init(ctx, cfg.Services); err != nil {
         return err
     }
-    defer rockservices.Stop()
+    defer services.Stop()
 
-    engine := rockengine.NewEngine()
-    apps.Register(engine, cfg.Apps)
-    return engine.Run() // blocks until SIGINT/SIGTERM or an app fails
+    return apps.Run(ctx, cfg.Apps) // rockengine: until SIGINT/SIGTERM or an App fails
 }
 ```
 
 ```go
 // pkg/services/services.go
-var Repository = rockservices.NewKey[repository.Service]("repository") // typed key
+const RepositoryName = "repository"
 
-type Configs struct {
-    Repository repository.Configs
+var catalog *rockservices.Catalog
+
+func Init(ctx context.Context, cfg Configs) error {
+    catalog = rockservices.New(map[string]rockservices.Service{
+        RepositoryName: repository.NewService(cfg.Repository),
+    })
+    return catalog.Init(ctx, RepositoryName)
 }
 
-func Register(c *rockservices.Catalog, cfg Configs) {
-    rockservices.Add(c, Repository, repository.NewService, cfg.Repository)
-}
+func Stop() error { return catalog.Stop() }
 
-// anywhere: services.Repository.Get().Insert(ctx, order)
+func Repository() repository.Service { return catalog.Get(RepositoryName).(repository.Service) }
+
+// anywhere: services.Repository().Insert(ctx, task)
 ```
 
 Where each piece of code goes and why: [GOROCK architecture](https://arzab.github.io/gorock/architecture/).

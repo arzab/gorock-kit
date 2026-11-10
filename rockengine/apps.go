@@ -4,7 +4,8 @@ import "context"
 
 // App defines the lifecycle of an application managed by Engine.
 //
-// Call order: Init → Exec → Stop. On restart: Stop → Init → Exec.
+// Call order: Init → Exec → Stop. With Engine.WithRestarts a failed App is
+// restarted: Stop → Init → Exec.
 //
 // Shutdown contract:
 //   - Exec must stop accepting new work when ctx is cancelled and return

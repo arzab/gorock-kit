@@ -34,25 +34,22 @@ func (a *WorkerApp) Stop() []error {
 }
 
 func Example() {
-	rockengine.Register("worker", &WorkerApp{}, rockengine.RestartPolicy{
-		MaxRetries: -1,
-		Delay:      2 * time.Second,
-		ResetAfter: time.Minute,
-	})
-	if err := rockengine.Run(); err != nil {
+	engine := rockengine.New(map[string]rockengine.App{
+		"worker": &WorkerApp{},
+	}).WithShutdownTimeout(15 * time.Second)
+
+	// Blocks until SIGINT/SIGTERM, ctx cancellation or an App failure.
+	if err := engine.Run(context.Background(), "worker"); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func ExampleNewEngine() {
-	engine := rockengine.NewEngine().
-		WithShutdownTimeout(15 * time.Second).
-		WithStopOnFatal(false).
-		WithFatalHandler(func(name string, err error) { log.Printf("app %s is dead: %v", name, err) })
+func ExampleEngine_WithRestarts() {
+	// Without an orchestrator: restart a failed App up to 3 times, a second apart.
+	engine := rockengine.New(map[string]rockengine.App{"worker": &WorkerApp{}}).
+		WithRestarts(3, time.Second)
 
-	engine.MustRegister("worker", &WorkerApp{}, rockengine.RestartPolicy{MaxRetries: 3, Delay: time.Second})
-
-	if err := engine.Run(); err != nil {
+	if err := engine.Run(context.Background(), "worker"); err != nil {
 		log.Fatal(err)
 	}
 }
